@@ -90,7 +90,7 @@ listw_knn5 <- nb2listw(nb_knn5, style = "W")
 
 Pour notre choix libre, nous optons pour une pondération par l'inverse de la distance. Contrairement aux matrices précédentes binaires (0 ou 1), celle-ci suppose que l'influence diminue avec l'éloignement géographique. Nous l'appliquons sur la structure des 5 voisins.
 
-```{r}
+```{r }
 # Calcul des distances entre les 5 plus proches voisins
 dist_knn5 <- nbdists(nb_knn5, coords)
 
@@ -117,7 +117,184 @@ plot(nb_knn5, coords, add = TRUE, col = "blue", lwd = 0.5, pch = ".")
 
 ## Analyse descriptive des variables expliquées
 
+Cette section se concentre sur les deux variables expliquées du projet :
+1.  **Dépenses de fonctionnement** (variable `lCFT_COM`)
+2.  **Dépenses d'investissement** (variable `lDIT_COM`)
+
+*Ces deux variables sont en échelle logarithmique, avec l'unité euros/hab.*
+
+### Statistiques descriptives
+
+Nous commençons par observer la distribution des données (tendance centrale, dispersion) et leur forme via des histogrammes.
+
+```{r desc_y, echo=FALSE, fig.height=6, fig.width=12, out.width="100%"}
+# Sélection des variables d'intérêt
+vars_y <- c("lCFT_COM", "lDIT_COM")
+
+# 1. Tableau résumé des statistiques
+st_drop_geometry(comBFC) %>% 
+  select(all_of(vars_y)) %>% 
+  summary()
+
+# 2. Visualisation des distributions (Histogrammes)
+p_dist_fonc <- ggplot(comBFC, aes(x = lCFT_COM)) +
+  geom_histogram(aes(y = ..density..), fill = "#4E79A7", color = "white", bins = 30) +
+  geom_density(alpha = 0.2, fill = "#4E79A7") +
+  theme_minimal() +
+  labs(title = "Distribution : Fonctionnement (log)", x = "Log Dépenses", y = "Densité")
+
+p_dist_inv <- ggplot(comBFC, aes(x = lDIT_COM)) +
+  geom_histogram(aes(y = ..density..), fill = "#E15759", color = "white", bins = 30) +
+  geom_density(alpha = 0.2, fill = "#E15759") +
+  theme_minimal() +
+  labs(title = "Distribution : Investissement (log)", x = "Log Dépenses", y = "Densité")
+
+# Affichage côte à côte
+grid.arrange(p_dist_fonc, p_dist_inv, ncol = 2)
+```
+
+### Cartographie des dépenses
+
+Voyons maintenant cela sur une carte.
+
+```{r, echo=FALSE}
+# Fonction de cartographie propre
+plot_depense <- function(data, var, titre, palette) {
+  ggplot(data) +
+    geom_sf(aes(fill = .data[[var]]), color = NA) + # color=NA pour alléger le tracé
+    scale_fill_viridis_c(option = palette, direction = -1, name = "Log €/hab") +
+    theme_void() +
+    theme(legend.position = "bottom",
+          plot.title = element_text(hjust = 0.5, face = "bold")) +
+    labs(title = titre)
+}
+
+# Carte Fonctionnement (Palette 'magma')
+map_y1 <- plot_depense(comBFC, "lCFT_COM", "Dépenses de Fonctionnement", "magma")
+
+# Carte Investissement (Palette 'viridis')
+map_y2 <- plot_depense(comBFC, "lDIT_COM", "Dépenses d'Investissement", "viridis")
+
+grid.arrange(map_y1, map_y2, ncol = 2)
+```
+
+### Autocorrélation spatiale globale (Moran)
+
+Nous utilisons le test de Moran pour confirmer statistiquement si les dépenses sont distribuées de manière aléatoire ou groupée dans l'espace. Nous utilisons la matrice de contiguïté (`listw_queen`) créée précédemment.
+
+```{r, echo=FALSE}
+# Test pour les dépenses de fonctionnement
+moran_fonc <- moran.test(comBFC$lCFT_COM, listw_queen)
+cat("--- Résultat Moran : Fonctionnement ---\n")
+print(moran_fonc)
+
+# Test pour les dépenses d'investissement
+moran_inv <- moran.test(comBFC$lDIT_COM, listw_queen)
+cat("\n--- Résultat Moran : Investissement ---\n")
+print(moran_inv)
+```
+
+### Statistiques LISA
+
+Les cartes LISA permettent d'identifier où se trouvent les clusters significatifs (Hotspots et Coldspots).
+
+```{r, echo=FALSE}
+# Fonction pour calculer et préparer la carte LISA
+get_lisa_map <- function(data, var_name, listw, titre_plot) {
+  
+  # 1. Calcul du Moran local
+  # On extrait le vecteur de données
+  x <- data[[var_name]]
+  locm <- localmoran(x, listw)
+  
+  # 2. Création des classes (HH, LL, HL, LH)
+  x_c <- x - mean(x)             # Variable centrée
+  lag_x_c <- lag.listw(listw, x_c) # Lag spatial centré
+  
+  # Seuil de significativité (p-value)
+  signif <- 0.05
+  
+  # Création d'un vecteur de classes
+  classes <- rep("Non Sig.", length(x))
+  
+  # On remplit les classes pour les communes significatives (colonne 5 = Pr(z > 0))
+  is_sig <- locm[, 5] <= signif
+  
+  classes[is_sig & x_c > 0 & lag_x_c > 0] <- "High-High" # Chaud-Chaud (Rouge)
+  classes[is_sig & x_c < 0 & lag_x_c < 0] <- "Low-Low"   # Froid-Froid (Bleu)
+  classes[is_sig & x_c > 0 & lag_x_c < 0] <- "High-Low"  # Anomalie (Rose)
+  classes[is_sig & x_c < 0 & lag_x_c > 0] <- "Low-High"  # Anomalie (Bleu clair)
+  
+  # Conversion en facteur ordonné pour la légende
+  data$lisa_cat <- factor(classes, levels = c("High-High", "Low-Low", "High-Low", "Low-High", "Non Sig."))
+  
+  # 3. Carte
+  ggplot(data) +
+    geom_sf(aes(fill = lisa_cat), color = NA) +
+    scale_fill_manual(values = c("High-High" = "#D7191C",  # Rouge vif
+                                 "Low-Low" = "#2C7BB6",    # Bleu fort
+                                 "High-Low" = "#FDAE61",   # Orange/Rose
+                                 "Low-High" = "#ABD9E9",   # Bleu pâle
+                                 "Non Sig." = "#F0F0F0"),  # Gris très clair
+                      name = "Cluster Type") +
+    theme_void() +
+    theme(legend.position = "right", 
+          plot.title = element_text(hjust = 0.5, face = "bold")) +
+    labs(title = titre_plot)
+}
+
+# Génération des deux cartes LISA
+map_lisa_fonc <- get_lisa_map(comBFC, "lCFT_COM", listw_queen, "Clusters LISA : Fonctionnement")
+map_lisa_inv <- get_lisa_map(comBFC, "lDIT_COM", listw_queen, "Clusters LISA : Investissement")
+
+# Affichage vertical pour bien voir les détails
+grid.arrange(map_lisa_fonc, map_lisa_inv, nrow = 2)
+```
+
 ## Analyse descriptive des variables explicatives
+
+Dans cette section, nous analysons les déterminants potentiels des dépenses publiques locales.
+
+### Signes attendus
+
+Nous avons retenu les variables suivantes en fonction de la littérature économique sur les finances locales. Voici les impacts attendus sur les dépenses :
+
+| Variable | Description | Signe attendu | Justification Économique |
+|:---|:---|:---:|:---|
+| `lPMUN` | Log Population | **+** | **Effet de taille** : Une population plus grande nécessite plus d'infrastructures et de services ("charges de centralité"). |
+| `lEMPLT` | Log Emploi sur place | **+** | **Attractivité économique** : Les pôles d'emploi attirent des usagers non-résidents qui consomment des services publics (transports, voirie). |
+| `prod_3_taxe_com` | Potentiel fiscal | **+** | **Effet richesse** : Plus une commune a une base fiscale élevée, plus elle a la capacité de dépenser (Loi de Wagner). |
+| `TXX_CHOM1564` | Taux de chômage | **+** | **Besoins sociaux** : Un chômage élevé accroît la demande d'interventions sociales (CCAS, aides). |
+| `TXX_RP_LOCHLMV` | Taux de logements HLM | **+** | **Précarité** : Indicateur de besoins sociaux spécifiques et de charges de gestion urbaine plus lourdes. |
+| `TXX_ENDET` | Taux d'endettement | **-** | **Contrainte financière** : Un stock de dette élevé génère des charges d'intérêts qui peuvent évincer les autres dépenses (effet "ciseau"). |
+| `TXX_RSECOCC` | Taux de résidences secondaires | **+** | **Tourisme** : Indique une vocation touristique nécessitant des suréquipements par rapport à la population permanente. |
+
+### Cartographie des variables clés
+
+Nous choisissons de cartographier deux dimensions opposées mais complémentaires des finances locales :
+1.  **La richesse (Ressources)** : Via le potentiel fiscal (`prod_3_taxe_com`). Cela permet de visualiser les inégalités territoriales de revenus.
+2.  **La précarité (Besoins)** : Via le taux de chômage (`TXX_CHOM1564`). Cela permet d'identifier les zones en difficulté sociale.
+
+```{r map_x, echo=FALSE, fig.height=10, fig.width=14, out.width="100%"}
+# Fonction de cartographie (réutilisation du style précédent)
+plot_x_var <- function(data, var, titre, palette, legend_title) {
+  ggplot(data) +
+    geom_sf(aes(fill = .data[[var]]), color = NA) +
+    scale_fill_viridis_c(option = palette, direction = -1, name = legend_title) +
+    theme_void() +
+    theme(legend.position = "bottom",
+          plot.title = element_text(hjust = 0.5, face = "bold")) +
+    labs(title = titre)
+}
+
+# Carte du Potentiel Fiscal (Richesse) - Palette 'cividis' (Jaune = Riche)
+map_x1 <- plot_x_var(comBFC, "prod_3_taxe_com", "Potentiel Fiscal (Richesse)", "cividis", "Euros/hab")
+
+# Carte du Chômage (Précarité) - Palette 'plasma' (Clair = Fort chômage)
+map_x2 <- plot_x_var(comBFC, "TXX_CHOM1564", "Taux de Chômage", "plasma", "% Actifs")
+
+grid.arrange(map_x1, map_x2, ncol = 2)
+```
 
 ## Estimation d’un modèle de régression linéaire – MCO
 
