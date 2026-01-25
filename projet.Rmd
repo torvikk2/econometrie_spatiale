@@ -1,0 +1,128 @@
+---
+title: "Évaluation - Économétrie Spatiale"
+author: "Victor Frison, Jonas Carlu, Adrien Mathieu, Fouad Afane"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list=ls())
+
+library(here)
+library(sf)
+library(tidyverse)
+
+
+library(gridExtra)
+library(spdep)      # Voisins, matrices de poids, tests de Moran
+library(spatialreg) # Modèles spatiaux (SAR, SEM, SDM) - anciennement dans spdep
+library(texreg)     # Pour de jolis tableaux de régression (screenreg, htmlreg)
+
+# Chargement des datas
+comBFC <- readRDS("comBFC.RDS")
+```
+
+## Introduction
+
+Ce projet a pour objectif d'analyser les déterminants des dépenses publiques locales au sein de la région **Bourgogne-Franche-Comté**. Nous nous intéressons particulièrement aux mécanismes d'interaction spatiale qui peuvent exister entre les communes, sous l'hypothèse que les choix budgétaires d'une commune sont influencés par ceux de ses voisines (phénomènes de mimétisme, concurrence fiscale ou effets de débordement).
+
+L'étude porte sur les données de l'année 2019. Nous analyserons deux variables dépendantes distinctes :
+1.  Les **dépenses de fonctionnement** par tête.
+2.  Les **dépenses d'investissement** par tête.
+
+La méthodologie adoptée suit une approche progressive :
+* Une analyse exploratoire des données spatiales (ESDA) pour détecter l'autocorrélation spatiale.
+* Une estimation par les Moindres Carrés Ordinaires (MCO) comme point de référence.
+* La mise en œuvre de modèles d'économétrie spatiale, notamment le modèle autorégressif spatial (SAR) et le modèle de Durbin spatial (SDM), pour quantifier les effets directs et indirects.
+
+## Construction de la matrice de poids
+
+Pour modéliser les interactions spatiales entre les communes de Bourgogne-Franche-Comté, nous devons définir comment les communes sont connectées. Nous construisons ici trois matrices de poids spatial ($W$) différentes.
+
+### Préparation des coordonnées
+
+Certaines méthodes (comme les plus proches voisins) nécessitent les centroïdes des communes.
+
+```{r coords, warning=FALSE}
+# Extraction des centroïdes pour les calculs de distance
+coords <- st_coordinates(st_centroid(comBFC))
+```
+
+### Matrice de contiguïté à l'ordre 1
+
+```{r contiguite}
+# Création de la liste des voisins (Queen)
+nb_queen <- poly2nb(comBFC, queen = TRUE)
+
+# Vérification d'éventuels isolats (communes sans voisins)
+if (any(card(nb_queen) == 0)) {
+  warning("Attention : Certaines communes n'ont pas de voisins (isolats).")
+}
+
+# Transformation en matrice de poids normalisée en ligne (Style "W")
+listw_queen <- nb2listw(nb_queen, style = "W", zero.policy = TRUE)
+
+# Résumé de la matrice
+summary(nb_queen)
+```
+
+### Matrice des 5 plus proches voisins
+
+Cette matrice considère deux communes comme voisines si elles partagent une frontière ou un simple point (sommet).
+
+```{r knn5}
+# Identification des 5 voisins les plus proches
+knn5 <- knearneigh(coords, k = 5)
+
+# Conversion en objet 'nb' (voisins)
+nb_knn5 <- knn2nb(knn5)
+
+# Transformation en matrice de poids normalisée (Style "W")
+listw_knn5 <- nb2listw(nb_knn5, style = "W")
+```
+
+### Matrice alternative : Inverse de la distance
+
+Pour notre choix libre, nous optons pour une pondération par l'inverse de la distance. Contrairement aux matrices précédentes binaires (0 ou 1), celle-ci suppose que l'influence diminue avec l'éloignement géographique. Nous l'appliquons sur la structure des 5 voisins.
+
+```{r}
+# Calcul des distances entre les 5 plus proches voisins
+dist_knn5 <- nbdists(nb_knn5, coords)
+
+# Calcul de l'inverse de la distance (1/d)
+idw_weights <- lapply(dist_knn5, function(x) 1/x)
+
+# Création de la matrice de poids avec ces valeurs
+listw_idw <- nb2listw(nb_knn5, glist = idw_weights, style = "W")
+```
+
+### Visualisation des connexions
+
+```{r visu, echo=FALSE, fig.height=10, fig.width=14, out.width="100%"}
+par(mfrow = c(1, 2), mar = c(0,0,1,0))
+
+# Carte des liens de contiguïté
+plot(st_geometry(comBFC), border = "grey", main = "Contiguïté (Queen)")
+plot(nb_queen, coords, add = TRUE, col = "red", lwd = 0.5, pch = ".")
+
+# Carte des liens k=5 voisins
+plot(st_geometry(comBFC), border = "grey", main = "5 Plus Proches Voisins")
+plot(nb_knn5, coords, add = TRUE, col = "blue", lwd = 0.5, pch = ".")
+```
+
+## Analyse descriptive des variables expliquées
+
+## Analyse descriptive des variables explicatives
+
+## Estimation d’un modèle de régression linéaire – MCO
+
+## Estimation d’un modèle SAR
+
+## Estimation d’un modèle de Durbin avec la population et l’emploi en variables décalées
+
+## Conclusion

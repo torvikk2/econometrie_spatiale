@@ -17,3 +17,7 @@ plot(comBFC)
 # Appariement du fonds de carte et de la base de données
 comBFC <- merge(comBFC,datBFC,by.x="INSEE_COM",by.y="CODGEO")
 rm(dat,com,datBFC)
+
+# Ajout Victor ----
+# Save en RDS nos datas
+saveRDS(comBFC, "comBFC.RDS")
