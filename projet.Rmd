@@ -441,71 +441,70 @@ map_chom <- tm_shape(comBFC) +
 tmap_arrange(map_pop, map_chom, ncol = 2)
 ```
 
-**Analyse de la Population** Communale La carte de la population met en évidence une forte hétérogénéité spatiale au sein de la région Bourgogne–Franche-Comté. Les communes les plus peuplées (en bleu foncé) se concentrent logiquement autour des principaux pôles urbains (Dijon, Besançon, Belfort-Montbéliard), dessinant l'armature urbaine régionale. À l’inverse, les vastes zones de teintes claires illustrent la prédominance spatiale des territoires ruraux plus faiblement peuplés. Cette variable est centrale car elle capte l'effet de taille : une population plus élevée implique mécaniquement des charges de centralité et des besoins accrus en infrastructures.
+### Estimation d’un modèle de régression linéaire – MCO
 
-**Analyse du Taux de Chômage** La carte du chômage révèle une géographie différente, celle de la fragilité sociale. Les zones de fort chômage (en teintes sombres/violettes) ne se superposent pas parfaitement à la hiérarchie urbaine. On observe des poches de précarité qui peuvent correspondre à d'anciens bassins industriels en reconversion ou à des zones périphériques en difficulté. Un taux de chômage élevé agit comme un indicateur de besoins sociaux accrus, exerçant une pression à la hausse sur les dépenses de fonctionnement (action sociale, CCAS) indépendamment de la taille de la commune.
+```{r}
+# Nous incluons les variables identifiées dans l'analyse descriptive
+formule <- lCFT_COM ~ lPMUN + lEMPLT + prod_3_taxe_com + TXX_CHOM1564 + TXX_RP_LOCHLMV + TXX_ENDET + TXX_RSECOCC + factor(DEP)
 
-## Statistiques descriptives univariées
+### Estimation MCO
+model_ols_fonc <- lm(formule, data = comBFC)
+model_ols_inv  <- lm(update(formule, lDIT_COM ~ .), data = comBFC)
 
-## Statistiques descriptives multivariées 
+# Affichage des résultats
+screenreg(list(model_ols_fonc, model_ols_inv), 
+          custom.model.names = c("Fonctionnement (MCO)", "Investissement (MCO)"),
+          omit.coef = "factor\\(DEP\\)")
 
-# Estimation d’un modèle de régression linéaire – MCO
-
-Avant de mobiliser les outils de l'économétrie spatiale, nous estimons un modèle linéaire standard (Moindres Carrés Ordinaires). Cela nous servira de point de comparaison.
-
-Nous estimons l'équation suivante pour nos deux variables dépendantes ($y$) :
-
-$$y_i = \beta_0 + \beta_1 \text{Pop}_i + \beta_2 \text{Emploi}_i + \beta_3 \text{Richesse}_i + \beta_4 \text{Chomage}_i + \beta_5 \text{HLM}_i + \beta_6 \text{Dette}_i + \varepsilon_i$$
-
-## Estimation des modèles
-
-```{r mco_estimation, echo=FALSE}
-# Définition des équations (formules)
-# On utilise les noms exacts de vos variables
-f_fonc <- lCFT_COM ~ lPMUN + lEMPLT + prod_3_taxe_com + TXX_CHOM1564 + TXX_RP_LOCHLMV + TXX_ENDET
-f_inv  <- lDIT_COM ~ lPMUN + lEMPLT + prod_3_taxe_com + TXX_CHOM1564 + TXX_RP_LOCHLMV + TXX_ENDET
-
-# Estimation par MCO (Fonction lm)
-mco_fonc <- lm(f_fonc, data = comBFC)
-mco_inv  <- lm(f_inv,  data = comBFC)
-
-# Affichage des résultats sous forme de tableau comparatif
-# Utilisation de screenreg (package texreg) pour un rendu propre dans la console/Rmd
-screenreg(list(mco_fonc, mco_inv),
-          custom.model.names = c("Fonctionnement", "Investissement"),
-          digits = 3)
+### Diagnostics de Moran sur les résidus
+lm.morantest(model_ols_fonc, listw_queen)
 ```
-
-Le tableau de régression ci-dessus nous donne une première estimation des déterminants :
-- Les variables portant des étoiles (`***`, `**`, `*`) sont statistiquement significatives.
-- Il est probable que la **Population** (`lPMUN`) et la **Richesse fiscale** (`prod_3_taxe_com`) aient des coefficients positifs significatifs, confirmant les effets de taille et de richesse (Loi de Wagner).
-
-## Diagnostics des résidus
-
-L'hypothèse fondamentale des MCO est que les résidus ($\varepsilon$) sont indépendants. Or, en présence de données géographiques, il est fréquent que les erreurs soient corrélées spatialement (ce qu'on n'a pas expliqué ici déborde sur le voisin).
-
-Nous appliquons le **Test de Moran sur les résidus** pour vérifier cette hypothèse.
-
-```{r, echo=FALSE}
-test_moran_res_fonc <- lm.morantest(mco_fonc, w_queen, alternative = "two.sided")
-test_moran_res_inv  <- lm.morantest(mco_inv,  w_queen, alternative = "two.sided")
-
-cat("--- Test de Moran sur les résidus (Fonctionnement) ---\n")
-print(test_moran_res_fonc)
-
-cat("\n--- Test de Moran sur les résidus (Investissement) ---\n")
-print(test_moran_res_inv)
-```
-
-**Dépenses de fonctionnement :** La p-value est très faible (généralement $< 0.05$). Nous rejetons l'hypothèse nulle d'absence d'autocorrélation spatiale. Les erreurs ne sont pas distribuées aléatoirement : il reste de la structure spatiale non expliquée par nos variables indépendantes.
-
-**Dépenses d'investissement :** De même, si le test est significatif, cela indique que les choix d'investissement dépendent de facteurs géographiques non observés ou des voisins.
-
-**Conclusion :**
-La présence avérée d'autocorrélation spatiale dans les résidus viole l'hypothèse d'indépendance des erreurs des MCO. Les estimateurs classiques risquent d'être biaisés ou inefficaces. **Ce diagnostic justifie formellement le recours aux modèles d'économétrie spatiale (SAR, SDM)** pour modéliser explicitement ces interactions.
+Le modèle MCO initial montre que la population et le potentiel fiscal expliquent une part importante des dépenses. Cependant, le test de Moran sur les résidus est hautement significatif ($p < 0.001$), confirmant une autocorrélation spatiale non captée. Le modèle MCO est donc incomplet car il ignore les interactions de voisinage, ce qui impose le recours à l'économétrie spatiale.
 
 # Estimation d’un modèle SAR
 
-# Estimation d’un modèle de Durbin avec la population et l’emploi en variables décalées
+Le modèle SAR (Spatial Autoregressive) suppose que les dépenses d'une commune dépendent des dépenses de ses voisines (effet de mimétisme).
+$$y = \rho Wy + X\beta + \varepsilon$$
 
-# Conclusion
+```{r}
+### Estimation par Maximum de Vraisemblance (ML)
+sar_ml_fonc <- lagsarlm(formule, data = comBFC, listw = listw_queen, method = "Matrix") #<- Matrix car sinon beaucoup trop long
+
+### Estimation par les Moindres Carrés Doubles Spatiaux (2SLS) - Plus robuste à la non-normalité
+sar_2sls_fonc <- stsls(formule, data = comBFC, listw = listw_queen)
+
+# Résumé des résultats SAR pour le fonctionnement
+summary(sar_ml_fonc)
+```
+
+### Analyse des impacts (Effets Directs et Indirects)
+
+Dans un modèle spatial, le coefficient $\beta$ ne représente pas l'effet total.
+
+```{r}
+W_mat <- as(listw_queen, "CsparseMatrix")
+impacts_sar <- impacts(sar_ml_fonc, listw = listw_queen, R = 500)
+summary(impacts_sar, zstats = TRUE, short = TRUE)
+```
+
+L'estimation du modèle SAR révèle un coefficient autorégressif $\rho$ (Rho) positif et significatif. Cela valide l'existence d'un effet de mimétisme : les choix budgétaires d'une commune sont influencés par les niveaux de dépenses de ses voisines. Les résultats sont robustes, que l'on utilise le Maximum de Vraisemblance (ML) ou les Moindres Carrés Doubles Spatiaux (2SLS).
+
+
+## Estimation d’un modèle de Durbin avec la population et l’emploi en variables décalées
+
+Le modèle de Durbin est le plus complet : il inclut le retard spatial de la variable dépendante ($Wy$) ET le retard spatial des variables explicatives ($WX$). Nous nous focalisons sur les lags de la population et de l'emploi.
+
+```{r}
+# On définit les variables à décaler spatialement (Population et Emploi)
+sdm_fonc <- lagsarlm(formule, data = comBFC, listw = listw_queen, 
+                     Durbin = ~ lPMUN + lEMPLT, method = "Matrix")
+
+# Comparaison SAR vs SDM (Test de rapport de vraisemblance)
+LR.Sarlm(sdm_fonc, sar_ml_fonc)
+```
+Le modèle de Durbin (SDM) s'avère supérieur au modèle SAR (confirmé par le test LR). Il montre que les caractéristiques des voisins (population, emploi) impactent directement les dépenses locales. L'analyse des impacts indirects souligne l'existence de "spillovers" : une forte activité économique chez les voisins génère des charges de centralité (infrastructures, services) pour la commune, au-delà de ses propres besoins internes.
+
+
+## Conclusion
+
+L'analyse démontre que les finances locales en Bourgogne-Franche-Comté sont interdépendantes. La présence de clusters spatiaux et la significativité des effets de débordement suggèrent que les politiques de dépenses ne doivent plus être pensées de manière isolée, mais à l'échelle des bassins de vie pour optimiser la gestion des équipements publics.
