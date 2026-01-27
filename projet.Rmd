@@ -573,17 +573,30 @@ Dans un modèle SAR, les coefficients $\beta$ ne peuvent pas être interprétés
 - Impact Indirect (Spillover) : L'effet d'une variation d'une variable $X$ dans la commune $i$ sur les dépenses de toutes les autres communes voisines.
 - Impact Total : La somme des deux.
 
-```{r, echo=FALSE}
+```{r, echo=FALSE, eval=FALSE}
 # Calcul des impacts pour les modèles ML (Méthode Monte Carlo pour les p-values)
 # R = 500 simulations (augmenter si nécessaire)
 imp_fonc <- impacts(sar_ml_fonc, listw = w_queen, R = 500)
 imp_inv  <- impacts(sar_ml_inv,  listw = w_queen, R = 500)
+```
 
+```{r, echo=FALSE, eval=FALSE}
+saveRDS(imp_fonc, "imp_fonc.RDS")
+saveRDS(imp_inv, "imp_inv.RDS")
+```
+
+```{r, echo=FALSE}
+imp_fonc <- readRDS("imp_fonc.RDS")
+imp_inv  <- readRDS("imp_inv.RDS")
+```
+
+
+```{r, echo=FALSE}
 cat("=== IMPACTS : Dépenses de Fonctionnement ===\n")
-summary(imp_fonc, zstats = TRUE, short = TRUE)
+summary(imp_fonc, zstats = FALSE, short = TRUE)
 
 cat("\n=== IMPACTS : Dépenses d'Investissement ===\n")
-summary(imp_inv, zstats = TRUE, short = TRUE)
+summary(imp_inv, zstats = FALSE, short = TRUE)
 ```
 
 **Analyse détaillée des résultats** L’analyse des impacts nous permet de comprendre la diffusion spatiale des chocs économiques :
