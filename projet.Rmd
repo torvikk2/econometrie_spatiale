@@ -1,4 +1,4 @@
----
+  ---
 title: "Évaluation - Économétrie Spatiale"
 author: "Victor Frison, Jonas Carlu, Adrien Mathieu, Fouad Afane"
 date: "`r format(Sys.time(), '%d %B %Y')`"
@@ -63,7 +63,8 @@ p_load(
   tmap,
   kableExtra,
   gridExtra,
-  texreg
+  texreg,
+  stargazer
 )
 
 # Chargement des datas
@@ -447,6 +448,28 @@ tmap_arrange(map_pop, map_chom, ncol = 2)
 
 ## Statistiques descriptives univariées
 
+Nous présentons ici les statistiques résumées des variables qui seront utilisées comme facteurs explicatifs dans nos modèles.
+
+```{r desc_x_stats, echo=FALSE, results='asis'}
+
+# On ne garde que les colonnes numériques d'intérêt
+vars_x <- comBFC %>% 
+  st_drop_geometry() %>% 
+  select(lPMUN, lEMPLT, prod_3_taxe_com, TXX_CHOM1564, 
+         TXX_RP_LOCHLMV, TXX_ENDET, TXX_RSECOCC) %>%
+  as.data.frame()
+
+# 2. Tableau descriptif avec Stargazer
+# type = "latex" permet un affichage parfait lors de la compilation PDF
+stargazer(vars_x, type = "latex", 
+          title = "Statistiques descriptives des variables explicatives",
+          summary.stat = c("n", "mean", "sd", "min", "max"),
+          header = FALSE, 
+          digits = 2,
+          table.placement = "H")
+```
+Ce tableau met en évidence la forte hétérogénéité des communes de Bourgogne-Franche-Comté. On observe des disparités marquées, notamment sur le plan social avec un taux de chômage variant de 0 à 38,5 % selon les territoires. La variable touristique ($\textbf{TXX_RSECOCC}$) montre également que certaines communes sont quasi-exclusivement dédiées à la villégiature (jusqu'à 73 % de résidences secondaires), tandis que la moyenne régionale s'établit autour de 13,7 %. Le taux d'endettement moyen ($\textbf{TXX_ENDET}$) est de 0,77, mais atteint des sommets (9,07) pour certaines communes en situation critique. 
+
 ## Statistiques descriptives multivariées 
 
 # Estimation d’un modèle de régression linéaire – MCO
@@ -496,7 +519,7 @@ print(test_moran_res_fonc)
 cat("\n--- Test de Moran sur les résidus (Investissement) ---\n")
 print(test_moran_res_inv)
 ```
-
+ 
 **Dépenses de fonctionnement :** La p-value est très faible (généralement $< 0.05$). Nous rejetons l'hypothèse nulle d'absence d'autocorrélation spatiale. Les erreurs ne sont pas distribuées aléatoirement : il reste de la structure spatiale non expliquée par nos variables indépendantes.
 
 **Dépenses d'investissement :** De même, si le test est significatif, cela indique que les choix d'investissement dépendent de facteurs géographiques non observés ou des voisins.
