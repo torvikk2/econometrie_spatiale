@@ -3,6 +3,9 @@ title: "Projet d’économétrie spatiale – Région Bourgogne-Franche-Comté"
 author: "Ton nom"
 date: "`r format(Sys.Date(), '%d %B %Y')`"
 output:
+  html_document:
+    toc: false
+    df_print: paged
   pdf_document:
     latex_engine: xelatex
     number_sections: true
@@ -56,10 +59,10 @@ Les données utilisées dans ce projet proviennent de la base fournie dans le ca
 L’analyse repose sur des données communales appariées à un fonds de carte à l’échelle de la commune. Les données socio-économiques sont issues de la base fournie dans le cadre du cours et le fonds de carte correspond aux contours communaux. Le champ de l’étude est restreint à la région Bourgogne-Franche-Comté. L’appariement est réalisé à l’aide du code INSEE communal.
 ```{r data}
 # Chargement de la base de données 
-load("Evaluation/dat.RData")
+load("dat.RData")
 
 # Chargement du fonds de carte
-com <- st_read("Evaluation/commune.shp")
+com <- st_read("commune.shp")
 
 # Sélection de la région Bourgogne–Franche-Comté
 datBFC <- subset(dat, dat$REG %in% c("26","43"))
@@ -117,7 +120,7 @@ knn5 <- knearneigh(coords, k = 5)
 nb_knn5 <- knn2nb(knn5)
 summary(nb_knn5)
 
-# Poids standardisés en ligne
+# 
 W_knn5 <- nb2listw(nb_knn5, style = "W")
 ```
 Le voisinage 5-NN impose exactement 5 voisins par commune. La liste peut être non symétrique, car la proximité n’est pas forcément réciproque (A peut être dans les 5 plus proches de B sans que B soit dans les 5 plus proches de A).
