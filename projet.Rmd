@@ -1,33 +1,78 @@
 ---
 title: "Évaluation - Économétrie Spatiale"
 author: "Victor Frison, Jonas Carlu, Adrien Mathieu, Fouad Afane"
-date: "`r Sys.Date()`"
+date: "`r format(Sys.time(), '%d %B %Y')`"
 output:
-  html_document:
+  pdf_document:
+    latex_engine: xelatex
     toc: true
+    toc_depth: 3
     number_sections: true
+    highlight: tango          # Coloration syntaxique du code plus jolie
+    df_print: kable           # Affichage par défaut des tableaux
+header-includes:
+  - \usepackage{geometry}
+  - \geometry{left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm} # Marges aérées
+  - \usepackage{xcolor}
+  - \definecolor{bleu_univ}{RGB}{44, 62, 80} # Un bleu gris sombre élégant
+  - \definecolor{rouge_lien}{RGB}{200, 0, 0}
+  - \usepackage{sectsty}
+  - \sectionfont{\color{bleu_univ}\sffamily}  # Titres en bleu et sans empattement
+  - \subsectionfont{\color{bleu_univ}\sffamily}
+  - \usepackage{fancyhdr}     # Pour les en-têtes et pieds de page
+  - \pagestyle{fancy}
+  - \fancyhead[L]{Économétrie Spatiale}
+  - \fancyhead[R]{\thepage}
+  - \usepackage{hyperref}     # Liens cliquables propres
+  - \hypersetup{colorlinks=true, linkcolor=bleu_univ, urlcolor=rouge_lien}
+  - \usepackage{float}        # Pour forcer le placement des images
+  - \floatplacement{figure}{H} 
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(
+  echo = TRUE,          # Affiche le code
+  message = FALSE,      # Cache les messages de chargement
+  warning = FALSE,      # Cache les warnings
+  
+  #--- Gestion des figures ---#
+  fig.align = "center", # Centre toutes les images
+  fig.pos = "H",        # Force l'image à rester LA où vous l'avez mise dans le code
+  out.width = "90%",    # L'image prend 90% de la largeur de la page (très propre)
+  fig.width = 8,        # Largeur de base plus grande pour la lisibilité
+  fig.height = 6,       
+  dpi = 300,            # Haute résolution (indispensable pour les cartes !)
+  
+  #--- Gestion du code ---#
+  comment = ">",       # Rend les sorties console plus jolies
+  background = "#F7F7F7" # Gris très léger derrière le code pour le détacher
+)
 
 rm(list=ls())
 
-library(here)
-library(sf)
-library(tidyverse)
-
-
-library(gridExtra)
-library(spdep)      # Voisins, matrices de poids, tests de Moran
-library(spatialreg) # Modèles spatiaux (SAR, SEM, SDM) - anciennement dans spdep
-library(texreg)     # Pour de jolis tableaux de régression (screenreg, htmlreg)
+library(pacman)
+p_load(
+  here,
+  sf,
+  spdep,
+  robustHD,
+  mapsf,
+  dplyr,
+  spatialreg,
+  GWmodel,
+  tmap,
+  kableExtra,
+  gridExtra,
+  texreg
+)
 
 # Chargement des datas
 comBFC <- readRDS("comBFC.RDS")
 ```
 
-## Introduction
+\newpage
+
+# Introduction
 
 Ce projet a pour objectif d'analyser les déterminants des dépenses publiques locales au sein de la région **Bourgogne-Franche-Comté**. Nous nous intéressons particulièrement aux mécanismes d'interaction spatiale qui peuvent exister entre les communes, sous l'hypothèse que les choix budgétaires d'une commune sont influencés par ceux de ses voisines (phénomènes de mimétisme, concurrence fiscale ou effets de débordement).
 
@@ -40,70 +85,75 @@ La méthodologie adoptée suit une approche progressive :
 * Une estimation par les Moindres Carrés Ordinaires (MCO) comme point de référence.
 * La mise en œuvre de modèles d'économétrie spatiale, notamment le modèle autorégressif spatial (SAR) et le modèle de Durbin spatial (SDM), pour quantifier les effets directs et indirects.
 
-## Construction de la matrice de poids
+# Construction de la matrice de poids
 
-Pour modéliser les interactions spatiales entre les communes de Bourgogne-Franche-Comté, nous devons définir comment les communes sont connectées. Nous construisons ici trois matrices de poids spatial ($W$) différentes.
+Dans l’analyse économétrique spatiale, la spécification de la matrice de poids est une étape clé, car elle formalise la structure des interactions spatiales entre les unités géographiques.
 
-### Préparation des coordonnées
+Dans ce projet, plusieurs matrices de poids sont construites afin de refléter différentes hypothèses sur les mécanismes de dépendance spatiale entre communes. Toutes les matrices sont standardisées en ligne, de sorte que l’influence totale exercée par les voisins d’une commune soit normalisée à un.
+
+Trois approches sont retenues : une matrice de contiguïté d’ordre 1, une matrice basée sur les cinq plus proches voisins, et une matrice définie à partir d’une bande de distance.
+
+## Préparation des coordonnées
 
 Certaines méthodes (comme les plus proches voisins) nécessitent les centroïdes des communes.
 
-```{r coords, warning=FALSE}
-# Extraction des centroïdes pour les calculs de distance
+```{r coords}
 coords <- st_coordinates(st_centroid(comBFC))
 ```
 
-### Matrice de contiguïté à l'ordre 1
+## Matrice de contiguïté à l'ordre 1
 
 ```{r contiguite}
 # Création de la liste des voisins (Queen)
 nb_queen <- poly2nb(comBFC, queen = TRUE)
-
-# Vérification d'éventuels isolats (communes sans voisins)
-if (any(card(nb_queen) == 0)) {
-  warning("Attention : Certaines communes n'ont pas de voisins (isolats).")
-}
-
-# Transformation en matrice de poids normalisée en ligne (Style "W")
-listw_queen <- nb2listw(nb_queen, style = "W", zero.policy = TRUE)
-
-# Résumé de la matrice
 summary(nb_queen)
+
+# Matrice de poids standardisée en ligne
+w_queen <- nb2listw(nb_queen, style = "W", zero.policy = TRUE)
 ```
 
-### Matrice des 5 plus proches voisins
+D’après le résumé, le voisinage queen produit en moyenne environ 5,9 voisins par commune, avec une hétérogénéité modérée du nombre de voisins selon la géométrie des communes.
+
+## Matrice des 5 plus proches voisins
 
 Cette matrice considère deux communes comme voisines si elles partagent une frontière ou un simple point (sommet).
 
 ```{r knn5}
 # Identification des 5 voisins les plus proches
 knn5 <- knearneigh(coords, k = 5)
-
 # Conversion en objet 'nb' (voisins)
 nb_knn5 <- knn2nb(knn5)
-
-# Transformation en matrice de poids normalisée (Style "W")
-listw_knn5 <- nb2listw(nb_knn5, style = "W")
+# Poids standardisés en ligne
+w_knn5 <- nb2listw(nb_knn5, style = "W")
+w_knn5$neighbours
 ```
 
-### Matrice alternative : Inverse de la distance
+Le voisinage 5-NN impose exactement 5 voisins par commune. La liste peut être non symétrique, car la proximité n’est pas forcément réciproque (A peut être dans les 5 plus proches de B sans que B soit dans les 5 plus proches de A).
 
-Pour notre choix libre, nous optons pour une pondération par l'inverse de la distance. Contrairement aux matrices précédentes binaires (0 ou 1), celle-ci suppose que l'influence diminue avec l'éloignement géographique. Nous l'appliquons sur la structure des 5 voisins.
+##  Bande de distance (distance band)
 
-```{r }
-# Calcul des distances entre les 5 plus proches voisins
-dist_knn5 <- nbdists(nb_knn5, coords)
+Deux communes sont voisines si la distance entre leurs centroïdes est inférieure à un seuil d
+Le seuil est choisi automatiquement pour éviter les communes isolées (au moins un voisin par commune).
 
-# Calcul de l'inverse de la distance (1/d)
-idw_weights <- lapply(dist_knn5, function(x) 1/x)
+```{r W-distanceband}
+# Choix automatique d'une distance seuil : on prend la plus petite distance
+# garantissant au moins 1 voisin pour chaque commune
+dmin <- max(unlist(nbdists(knn2nb(knearneigh(coords, k = 1)), coords)))
+d <- dmin + 1  
 
-# Création de la matrice de poids avec ces valeurs
-listw_idw <- nb2listw(nb_knn5, glist = idw_weights, style = "W")
+# Bande de distance [0, d]
+nb_dist <- dnearneigh(coords, 0, d)
+summary(nb_dist)
+
+# Poids standardisés en ligne
+W_dist <- nb2listw(nb_dist, style = "W")
 ```
 
-### Visualisation des connexions
+Cette matrice génère un voisinage plus dense (ici, environ 13,9 voisins en moyenne), ce qui correspond à une interaction spatiale plus diffuse que la contiguïté ou le 5-NN.
 
-```{r visu, echo=FALSE, fig.height=10, fig.width=14, out.width="100%"}
+## Visualisation des connexions
+
+```{r visu, echo=FALSE}
 par(mfrow = c(1, 2), mar = c(0,0,1,0))
 
 # Carte des liens de contiguïté
@@ -115,7 +165,11 @@ plot(st_geometry(comBFC), border = "grey", main = "5 Plus Proches Voisins")
 plot(nb_knn5, coords, add = TRUE, col = "blue", lwd = 0.5, pch = ".")
 ```
 
-## Analyse descriptive des variables expliquées
+## Remarque sur la comparaison entre matrices
+
+Les matrices n’induisent pas la même densité ni la même structure de voisinage. Comparer les résultats obtenus avec plusieurs matrices permet de tester la robustesse des conclusions aux choix de spécification spatiale. La suite de l’analyse mobilise ces matrices pour mesurer l’autocorrélation spatiale (Moran global et indicateurs locaux) puis estimer des modèles économétriques spatiaux.
+
+# Analyse descriptive des variables expliquées
 
 Cette section se concentre sur les deux variables expliquées du projet :
 1.  **Dépenses de fonctionnement** (variable `lCFT_COM`)
@@ -123,28 +177,75 @@ Cette section se concentre sur les deux variables expliquées du projet :
 
 *Ces deux variables sont en échelle logarithmique, avec l'unité euros/hab.*
 
-### Statistiques descriptives
+## Cartographie des dépenses
 
-Nous commençons par observer la distribution des données (tendance centrale, dispersion) et leur forme via des histogrammes.
+Cette section propose une analyse exploratoire spatiale des dépenses communales de fonctionnement et d’investissement. Une première étape consiste à cartographier ces variables afin d’identifier d’éventuelles structures spatiales et des contrastes territoriaux à l’échelle régionale.
 
-```{r desc_y, echo=FALSE, fig.height=6, fig.width=12, out.width="100%"}
-# Sélection des variables d'intérêt
-vars_y <- c("lCFT_COM", "lDIT_COM")
+```{r, echo=FALSE}
+map_y1 <- tm_shape(comBFC) +
+  tm_polygons(fill = "lCFT_COM",
+              col = NA,
+              fill.scale = tm_scale_intervals(n = 5, style = "quantile", values = "magma", label.na = ""),
+              fill.legend = tm_legend(title = "Log €/hab")) +
+  tm_title("Dépenses de Fonctionnement") +
+  tm_layout(frame = FALSE, legend.outside = TRUE)
 
-# 1. Tableau résumé des statistiques
-st_drop_geometry(comBFC) %>% 
-  select(all_of(vars_y)) %>% 
-  summary()
+map_y2 <- tm_shape(comBFC) +
+  tm_polygons(fill = "lDIT_COM",
+              col = NA,
+              fill.scale = tm_scale_intervals(n = 5, style = "quantile", values = "viridis", label.na = ""),
+              fill.legend = tm_legend(title = "Log €/hab")) +
+  tm_title("Dépenses d'Investissement") +
+  tm_layout(frame = FALSE, legend.outside = TRUE)
 
-# 2. Visualisation des distributions (Histogrammes)
+tmap_arrange(map_y1, map_y2, ncol = 2)
+```
+
+Les cartes présentent la distribution spatiale des dépenses communales de fonctionnement et d’investissement dans la région Bourgogne-Franche-Comté. Ces représentations permettent d’identifier des contrastes territoriaux et suggèrent l’existence de structures spatiales, sans préjuger de leur significativité statistique. Quelques communes présentent des valeurs manquantes et apparaissent comme telles sur les cartes.
+
+## Statistiques descriptives
+
+Nous présentons ici des statistiques descriptives afin de caractériser la distribution des dépenses communales dans la région étudiée (tendance centrale, dispersion).
+
+```{r desc_y, echo=FALSE}
+# Calcul des statistiques
+desc_stats <- data.frame(
+  Variable = c("Dépenses de fonctionnement (log)", "Dépenses d’investissement (log)"),
+  Moyenne = c(mean(comBFC$lCFT_COM, na.rm = TRUE), mean(comBFC$lDIT_COM, na.rm = TRUE)),
+  Médiane = c(median(comBFC$lCFT_COM, na.rm = TRUE), median(comBFC$lDIT_COM, na.rm = TRUE)),
+  Écart_type = c(sd(comBFC$lCFT_COM, na.rm = TRUE), sd(comBFC$lDIT_COM, na.rm = TRUE)),
+  Minimum = c(min(comBFC$lCFT_COM, na.rm = TRUE), min(comBFC$lDIT_COM, na.rm = TRUE)),
+  Maximum = c(max(comBFC$lCFT_COM, na.rm = TRUE), max(comBFC$lDIT_COM, na.rm = TRUE))
+)
+
+# Affichage du tableau
+desc_stats %>%
+  kable(
+    caption = "Statistiques descriptives des dépenses communales (logarithmes)",
+    digits = 2,
+    align = "c"
+  ) %>%
+  kable_styling(
+    latex_options = c("hold_position", "striped"),
+    full_width = FALSE
+  )
+```
+
+D’après ces résultats, la distribution des dépenses de fonctionnement apparaît relativement symétrique, avec un écart-type faible, ce qui suggère des niveaux de dépenses plus stables entre les communes. En revanche, les dépenses d’investissement présentent une plus forte hétérogénéité, comme en témoigne un écart-type plus élevé. La présence d’un minimum nul (ou très faible) reflète l’absence de dépenses d’investissement pour certaines communes sur la période donnée. Cette variabilité peut s’expliquer par des différences de taille communale et par les modalités de prise en charge de l’investissement public, notamment au niveau intercommunal.
+
+Les histogrammes ci-dessous confirment visuellement ces distributions :
+
+```{r, echo=FALSE,  fig.height = 4}
+# Histogramme Fonctionnement
 p_dist_fonc <- ggplot(comBFC, aes(x = lCFT_COM)) +
-  geom_histogram(aes(y = ..density..), fill = "#4E79A7", color = "white", bins = 30) +
+  geom_histogram(aes(y = after_stat(density)), fill = "#4E79A7", color = "white", bins = 30) +
   geom_density(alpha = 0.2, fill = "#4E79A7") +
   theme_minimal() +
   labs(title = "Distribution : Fonctionnement (log)", x = "Log Dépenses", y = "Densité")
 
+# Histogramme Investissement
 p_dist_inv <- ggplot(comBFC, aes(x = lDIT_COM)) +
-  geom_histogram(aes(y = ..density..), fill = "#E15759", color = "white", bins = 30) +
+  geom_histogram(aes(y = after_stat(density)), fill = "#E15759", color = "white", bins = 30) +
   geom_density(alpha = 0.2, fill = "#E15759") +
   theme_minimal() +
   labs(title = "Distribution : Investissement (log)", x = "Log Dépenses", y = "Densité")
@@ -153,147 +254,191 @@ p_dist_inv <- ggplot(comBFC, aes(x = lDIT_COM)) +
 grid.arrange(p_dist_fonc, p_dist_inv, ncol = 2)
 ```
 
-### Cartographie des dépenses
+## Autocorrélation spatiale globale (Moran)
 
-Voyons maintenant cela sur une carte.
-
-```{r, echo=FALSE}
-# Fonction de cartographie propre
-plot_depense <- function(data, var, titre, palette) {
-  ggplot(data) +
-    geom_sf(aes(fill = .data[[var]]), color = NA) + # color=NA pour alléger le tracé
-    scale_fill_viridis_c(option = palette, direction = -1, name = "Log €/hab") +
-    theme_void() +
-    theme(legend.position = "bottom",
-          plot.title = element_text(hjust = 0.5, face = "bold")) +
-    labs(title = titre)
-}
-
-# Carte Fonctionnement (Palette 'magma')
-map_y1 <- plot_depense(comBFC, "lCFT_COM", "Dépenses de Fonctionnement", "magma")
-
-# Carte Investissement (Palette 'viridis')
-map_y2 <- plot_depense(comBFC, "lDIT_COM", "Dépenses d'Investissement", "viridis")
-
-grid.arrange(map_y1, map_y2, ncol = 2)
-```
-
-### Autocorrélation spatiale globale (Moran)
-
-Nous utilisons le test de Moran pour confirmer statistiquement si les dépenses sont distribuées de manière aléatoire ou groupée dans l'espace. Nous utilisons la matrice de contiguïté (`listw_queen`) créée précédemment.
+À ce stade de l'étude, nous cherchons à déterminer si les dépenses des communes sont distribuées de manière aléatoire ou si elles présentent une structure spatiale particulière (regroupement). Pour cela, nous utilisons le test global de Moran en nous appuyant sur la matrice de contiguïté définie précédemment (`w_queen``).
 
 ```{r, echo=FALSE}
-# Test pour les dépenses de fonctionnement
-moran_fonc <- moran.test(comBFC$lCFT_COM, listw_queen)
+# Test global de Moran pour les dépenses de fonctionnement
+moran_fonc <- moran.test(comBFC$lCFT_COM, w_queen)
+
+# Test global de Moran pour les dépenses d'investissement
+moran_inv <- moran.test(comBFC$lDIT_COM, w_queen)
+
+# Affichage des résultats
 cat("--- Résultat Moran : Fonctionnement ---\n")
 print(moran_fonc)
-
-# Test pour les dépenses d'investissement
-moran_inv <- moran.test(comBFC$lDIT_COM, listw_queen)
 cat("\n--- Résultat Moran : Investissement ---\n")
 print(moran_inv)
 ```
 
-### Statistiques LISA
+### Analyse des résultats
 
-Les cartes LISA permettent d'identifier où se trouvent les clusters significatifs (Hotspots et Coldspots).
+**Dépenses de fonctionnement** Les résultats du test mettent en évidence une autocorrélation spatiale positive et statistiquement significative ($p < 2.2 \times 10^{-16}$). La valeur élevée de l’indice de Moran ($I \approx 0.318$) indique que les communes présentant des niveaux de dépenses de fonctionnement similaires tendent à se regrouper spatialement. Ce résultat suggère l’existence de dépendances spatiales marquées (effets de voisinage ou caractéristiques territoriales partagées) pour ce type de dépenses.
 
-```{r, echo=FALSE}
-# Fonction pour calculer et préparer la carte LISA
-get_lisa_map <- function(data, var_name, listw, titre_plot) {
+**Dépenses d'investissement** Concernant les dépenses d’investissement, l’indice de Moran est également positif et significatif ($p < 0.05$). Toutefois, la valeur de l’indice est nettement plus faible ($I \approx 0.072$). Cela traduit une autocorrélation spatiale globale beaucoup plus modérée : les communes ayant des comportements d’investissement similaires sont proches géographiquement, mais de manière moins systématique que pour le fonctionnement. L'investissement semble répondre à des logiques plus ponctuelles ou hétérogènes.
+
+**Conclusion** La mise en évidence d’une autocorrélation spatiale globale (forte pour le fonctionnement, modérée pour l’investissement) justifie de poursuivre l’étude par une analyse des **structures locales (LISA)**. Cela nous permettra d’identifier précisément où se situent les clusters de fortes dépenses (points chauds) ou de faibles dépenses (points froids).
+
+## Autocorrélation spatiale locale : statistiques LISA
+
+**Objectif** Après avoir mis en évidence l’existence d’une autocorrélation spatiale globale des dépenses communales, cette section vise à identifier les structures locales d’autocorrélation. Les statistiques LISA (Local Indicators of Spatial Association) permettent de repérer les clusters spatiaux significatifs et les valeurs atypiques locales, à partir de l’indice de Moran local. L’analyse est réalisée à l’aide de la matrice de contiguïté d’ordre 1 standardisée en ligne, cohérente avec le test global précédent.
+
+```{r}
+# Fonction de calcul et classification LISA
+calc_lisa_clusters <- function(data, var_name, listw, alpha = 0.01) {
   
-  # 1. Calcul du Moran local
-  # On extrait le vecteur de données
+  # 1. Calcul du Moran Local
   x <- data[[var_name]]
+  # Standardisation
+  z <- as.numeric(scale(x))
+  # Lag spatial
+  lag_z <- lag.listw(listw, z)
+  # Calculs statistiques
   locm <- localmoran(x, listw)
+  pval <- locm[, 5]
   
-  # 2. Création des classes (HH, LL, HL, LH)
-  x_c <- x - mean(x)             # Variable centrée
-  lag_x_c <- lag.listw(listw, x_c) # Lag spatial centré
+  # 2. Classification
+  classes <- rep("Non Sig.", length(z))
   
-  # Seuil de significativité (p-value)
-  signif <- 0.05
+  # Logique de classification (HH, LL, HL, LH)
+  # Seuil de significativité appliqué (alpha)
+  is_sig <- pval <= alpha
   
-  # Création d'un vecteur de classes
-  classes <- rep("Non Sig.", length(x))
+  classes[is_sig & z >= 0 & lag_z >= 0] <- "High-High"
+  classes[is_sig & z <= 0 & lag_z <= 0] <- "Low-Low"
+  classes[is_sig & z >= 0 & lag_z <= 0] <- "High-Low"
+  classes[is_sig & z <= 0 & lag_z >= 0] <- "Low-High"
   
-  # On remplit les classes pour les communes significatives (colonne 5 = Pr(z > 0))
-  is_sig <- locm[, 5] <= signif
-  
-  classes[is_sig & x_c > 0 & lag_x_c > 0] <- "High-High" # Chaud-Chaud (Rouge)
-  classes[is_sig & x_c < 0 & lag_x_c < 0] <- "Low-Low"   # Froid-Froid (Bleu)
-  classes[is_sig & x_c > 0 & lag_x_c < 0] <- "High-Low"  # Anomalie (Rose)
-  classes[is_sig & x_c < 0 & lag_x_c > 0] <- "Low-High"  # Anomalie (Bleu clair)
-  
-  # Conversion en facteur ordonné pour la légende
-  data$lisa_cat <- factor(classes, levels = c("High-High", "Low-Low", "High-Low", "Low-High", "Non Sig."))
-  
-  # 3. Carte
-  ggplot(data) +
-    geom_sf(aes(fill = lisa_cat), color = NA) +
-    scale_fill_manual(values = c("High-High" = "#D7191C",  # Rouge vif
-                                 "Low-Low" = "#2C7BB6",    # Bleu fort
-                                 "High-Low" = "#FDAE61",   # Orange/Rose
-                                 "Low-High" = "#ABD9E9",   # Bleu pâle
-                                 "Non Sig." = "#F0F0F0"),  # Gris très clair
-                      name = "Cluster Type") +
-    theme_void() +
-    theme(legend.position = "right", 
-          plot.title = element_text(hjust = 0.5, face = "bold")) +
-    labs(title = titre_plot)
+  # Retourner le facteur ordonné
+  factor(classes, levels = c("High-High", "Low-Low", "High-Low", "Low-High", "Non Sig."))
 }
 
-# Génération des deux cartes LISA
-map_lisa_fonc <- get_lisa_map(comBFC, "lCFT_COM", listw_queen, "Clusters LISA : Fonctionnement")
-map_lisa_inv <- get_lisa_map(comBFC, "lDIT_COM", listw_queen, "Clusters LISA : Investissement")
-
-# Affichage vertical pour bien voir les détails
-grid.arrange(map_lisa_fonc, map_lisa_inv, nrow = 2)
+# Application aux données
+comBFC$cluster_fonc <- calc_lisa_clusters(comBFC, "lCFT_COM", w_queen, alpha = 0.01)
+comBFC$cluster_inv  <- calc_lisa_clusters(comBFC, "lDIT_COM", w_queen, alpha = 0.01)
 ```
 
-## Analyse descriptive des variables explicatives
+```{r echo=FALSE}
+# Définition des couleurs (Rouge, Bleu, Orange, Bleu pâle, Gris)
+lisa_colors <- c("High-High" = "#D7191C", 
+                 "Low-Low"   = "#2C7BB6", 
+                 "High-Low"  = "#FDAE61", 
+                 "Low-High"  = "#ABD9E9", 
+                 "Non Sig."  = "#F0F0F0")
+
+# Fonction d'affichage tmap
+plot_lisa_tmap <- function(data, var_cluster, titre) {
+  tm_shape(data) +
+    tm_polygons(fill = var_cluster,
+                col = NA,
+                fill.scale = tm_scale_categorical(values = lisa_colors),
+                fill.legend = tm_legend(title = "Type de Cluster")) +
+    tm_title(titre) +
+    tm_layout(frame = FALSE, legend.outside = TRUE)
+}
+```
+
+### LISA – Dépenses de fonctionnement
+
+```{r, echo=FALSE}
+plot_lisa_tmap(comBFC, "cluster_fonc", "Clusters LISA : Fonctionnement")
+```
+
+La carte des statistiques LISA appliquées aux dépenses de fonctionnement met en évidence l’existence de clusters spatiaux localisés. Des regroupements de communes caractérisées par des niveaux élevés de dépenses de fonctionnement, entourées de communes aux profils similaires (clusters **High-High** en rouge), apparaissent principalement autour de certains pôles territoriaux. À l’inverse, des clusters de faibles dépenses (**Low-Low** en bleu) se concentrent davantage dans des zones à dominante rurale.
+
+Néanmoins, le nombre de clusters significatifs demeure relativement limité. La majorité des communes n’appartient à aucun cluster statistiquement significatif au seuil de 1 % (gris), ce qui indique que l’autocorrélation spatiale des dépenses de fonctionnement, bien que présente, reste essentiellement localisée et ne concerne qu’une partie restreinte du territoire régional.
+
+### LISA – Dépenses d'investissemen
+
+```{r, echo=FALSE}
+plot_lisa_tmap(comBFC, "cluster_inv", "Clusters LISA : Investissement")
+```
+
+La carte des statistiques LISA appliquées aux dépenses d’investissement met également en évidence la présence de clusters spatiaux, bien que leur structure diffère de celle observée pour les dépenses de fonctionnement. Les clusters **High-High** apparaissent de manière plus ponctuelle et semblent davantage concentrés dans certaines zones spécifiques du territoire.
+
+Les clusters **Low-Low**, bien que présents, restent relativement dispersés et concernent un nombre limité de communes. Comme pour les dépenses de fonctionnement, la majorité des communes ne présente pas d’autocorrélation spatiale locale significative au seuil de 1 %, ce qui suggère que les dépenses d’investissement sont plus hétérogènes spatialement et moins systématiquement structurées par des effets de voisinage.
+
+# Analyse descriptive des variables explicatives
 
 Dans cette section, nous analysons les déterminants potentiels des dépenses publiques locales.
 
-### Signes attendus
+## Signes attendus des variables explicatives
 
-Nous avons retenu les variables suivantes en fonction de la littérature économique sur les finances locales. Voici les impacts attendus sur les dépenses :
+Avant de procéder à l’analyse économétrique, il convient de préciser les signes attendus des variables explicatives sur les dépenses communales. Ces hypothèses reposent sur la littérature économique relative aux finances locales (effet de taille, charges de centralité, loi de Wagner) et sur les mécanismes institutionnels.
 
-| Variable | Description | Signe attendu | Justification Économique |
-|:---|:---|:---:|:---|
-| `lPMUN` | Log Population | **+** | **Effet de taille** : Une population plus grande nécessite plus d'infrastructures et de services ("charges de centralité"). |
-| `lEMPLT` | Log Emploi sur place | **+** | **Attractivité économique** : Les pôles d'emploi attirent des usagers non-résidents qui consomment des services publics (transports, voirie). |
-| `prod_3_taxe_com` | Potentiel fiscal | **+** | **Effet richesse** : Plus une commune a une base fiscale élevée, plus elle a la capacité de dépenser (Loi de Wagner). |
-| `TXX_CHOM1564` | Taux de chômage | **+** | **Besoins sociaux** : Un chômage élevé accroît la demande d'interventions sociales (CCAS, aides). |
-| `TXX_RP_LOCHLMV` | Taux de logements HLM | **+** | **Précarité** : Indicateur de besoins sociaux spécifiques et de charges de gestion urbaine plus lourdes. |
-| `TXX_ENDET` | Taux d'endettement | **-** | **Contrainte financière** : Un stock de dette élevé génère des charges d'intérêts qui peuvent évincer les autres dépenses (effet "ciseau"). |
-| `TXX_RSECOCC` | Taux de résidences secondaires | **+** | **Tourisme** : Indique une vocation touristique nécessitant des suréquipements par rapport à la population permanente. |
+Nous avons regroupé ces déterminants en quatre catégories principales : démographie et économie, caractéristiques spatiales, structure sociale et logement, et enfin situation financière.
 
-### Cartographie des variables clés
+### Variables démographiques et économiques
 
-Nous choisissons de cartographier deux dimensions opposées mais complémentaires des finances locales :
-1.  **La richesse (Ressources)** : Via le potentiel fiscal (`prod_3_taxe_com`). Cela permet de visualiser les inégalités territoriales de revenus.
-2.  **La précarité (Besoins)** : Via le taux de chômage (`TXX_CHOM1564`). Cela permet d'identifier les zones en difficulté sociale.
+- **Population (`1PMUN`) :** La population municipale est le premier déterminant des besoins en services publics. Une population plus importante implique des "charges de centralité" (équipements collectifs, personnel). Le signe attendu est **positif (+)**.
+- **Emploi sur place (`1EMPLT`) :** Ce proxy de l'attractivité économique mesure l'afflux d'usagers non-résidents (navetteurs) qui consomment des services (voirie, transports) sans nécessairement contribuer à la fiscalité résidentielle. Un effet **positif est attendu (+)**.
+- **Potentiel fiscal (`prod_3_taxe_com`) :** Selon la loi de Wagner, la demande de biens publics croît avec la richesse. Une base fiscale plus élevée offre une capacité de financement supérieure ("effet richesse"), favorisant la dépense. Signe attendu : **positif (+)**.
 
-```{r map_x, echo=FALSE, fig.height=10, fig.width=14, out.width="100%"}
-# Fonction de cartographie (réutilisation du style précédent)
-plot_x_var <- function(data, var, titre, palette, legend_title) {
-  ggplot(data) +
-    geom_sf(aes(fill = .data[[var]]), color = NA) +
-    scale_fill_viridis_c(option = palette, direction = -1, name = legend_title) +
-    theme_void() +
-    theme(legend.position = "bottom",
-          plot.title = element_text(hjust = 0.5, face = "bold")) +
-    labs(title = titre)
-}
+### Variables spatiales
 
-# Carte du Potentiel Fiscal (Richesse) - Palette 'cividis' (Jaune = Riche)
-map_x1 <- plot_x_var(comBFC, "prod_3_taxe_com", "Potentiel Fiscal (Richesse)", "cividis", "Euros/hab")
+- **Superficie et urbanisation (`1SUPERF`, `1surfres`, `1surfact`) :** Une superficie communale étendue génère des coûts d'entretien (réseaux, voirie) plus élevés. De même, l'extension des surfaces urbanisées (résidentielles ou économiques) accroît la pression sur les infrastructures. Le signe attendu est **positif (+)**, particulièrement pour l'investissement.
 
-# Carte du Chômage (Précarité) - Palette 'plasma' (Clair = Fort chômage)
-map_x2 <- plot_x_var(comBFC, "TXX_CHOM1564", "Taux de Chômage", "plasma", "% Actifs")
+### Variables sociales et structure du logement
 
-grid.arrange(map_x1, map_x2, ncol = 2)
+Certaines variables captent des besoins sociaux spécifiques nécessitant une intervention publique accrue (CCAS, aides, politique de la ville) :
+
+- **Précarité et besoins sociaux :** Le taux de chômage (`TXX_CHOM1564`), le taux de logements HLM (`TXX_RP_LOCHLMV`) et la part des personnes âgées (`TXX_SEUL65P`) sont des indicateurs de populations vulnérables ou dépendantes de services publics spécifiques. Un signe **positif est attendu (+)**.
+- **Tourisme (`TXX_RSECOCC`) :** Un fort taux de résidences secondaires indique une vocation touristique imposant des suréquipements (dimensionnés pour les pics de fréquentation) par rapport à la population permanente. Signe attendu : **positif (+)**.
+- **Vacance (`TXX_LOGVAC`) :** À l'inverse, un taux élevé de logements vacants peut refléter une déprise territoriale et une moindre pression sur les services, suggérant un signe **négatif (-)**.
+
+### Variables financières
+
+- **Dette (`TXX_ENDET`, `ANNUITE_COM`) :** Le poids de la dette passée contraint les marges de manœuvre actuelles. Un endettement élevé génère des charges d'intérêts (effet "ciseau") et limite la capacité d'autofinancement pour les nouveaux projets. Un signe **négatif est attendu (-)**, spécifiquement sur l'investissement.
+
+## Synthèse des effets attendus
+
+Le tableau ci-dessous résume les hypothèses pour l'ensemble des variables retenues :
+
+| Variable | Libellé | Signe | Justification économique majeure |
+| :--- | :--- | :---: | :--- |
+| `1PMUN` | Log Population | **+** | Effet de taille et charges de centralité. |
+| `1EMPLT` | Log Emploi sur place | **+** | Attractivité et coûts liés aux usagers non-résidents. |
+| `prod_3_taxe_com`| Potentiel fiscal | **+** | Effet richesse (capacité à dépenser). |
+| `1SUPERF` | Log Superficie | **+** | Coûts de réseaux et d'entretien de l'espace. |
+| `1surfres/act` | Surfaces urbanisées | **+** | Pression sur les infrastructures (voirie, réseaux). |
+| `TXX_CHOM1564` | Taux de chômage | **+** | Demande d'interventions sociales. |
+| `TXX_RP_LOCHLMV` | Taux de logements HLM| **+** | Indicateur de charges socio-urbaines. |
+| `TXX_SEUL65P` | Part des 65 ans et + | **+** | Besoins en services à la personne / action sociale. |
+| `TXX_RSECOCC` | Taux résid. secondaires| **+** | Surcoûts liés à la vocation touristique. |
+| `TXX_LOGVAC` | Taux logements vacants | **-** | Moindre pression démographique et de service. |
+| `TXX_ENDET` | Taux d'endettement | **-** | Contrainte financière (effet d'éviction). |
+
+## Cartographie des variables explicatives clés
+
+Afin de compléter l’analyse descriptive, nous proposons une cartographie de deux variables explicatives majeures. Ces variables ont été sélectionnées pour leur capacité à illustrer deux dimensions opposées mais complémentaires des finances locales :
+
+1.  **La dimension structurelle (Hiérarchie urbaine) :** Via la population communale (`1PMUN`). Elle conditionne mécaniquement le niveau des dépenses et l'offre d'équipements.
+2.  **La dimension sociale (Besoins) :** Via le taux de chômage (`TXX_CHOM1564`). Elle permet d'identifier les zones de fragilité nécessitant des interventions publiques spécifiques.
+
+Cette étape exploratoire permet de visualiser les structures territoriales (concentrations, gradients, oppositions) avant de tester les relations causales dans le modèle économétrique.
+
+```{r, echo=FALSE}
+# 1. Carte de la Population (Log)
+map_pop <- tm_shape(comBFC) +
+  tm_polygons(fill = "lPMUN",
+              col = NA,
+              fill.scale = tm_scale_intervals(n = 5, style = "quantile", values = "Blues", label.na = ""),
+              fill.legend = tm_legend(title = "Log Population")) +
+  tm_title("Population Communale") +
+  tm_layout(frame = FALSE, legend.outside = TRUE)
+
+# 2. Carte du Chômage
+map_chom <- tm_shape(comBFC) +
+  tm_polygons(fill = "TXX_CHOM1564",
+              col = NA,
+              fill.scale = tm_scale_intervals(n = 5, style = "quantile", values = "plasma", label.na = ""),
+              fill.legend = tm_legend(title = "% Actifs 15-64 ans")) +
+  tm_title("Taux de Chômage") +
+  tm_layout(frame = FALSE, legend.outside = TRUE)
+
+# Affichage côte à côte
+tmap_arrange(map_pop, map_chom, ncol = 2)
 ```
 
 ### Estimation d’un modèle de régression linéaire – MCO
@@ -316,7 +461,7 @@ lm.morantest(model_ols_fonc, listw_queen)
 ```
 Le modèle MCO initial montre que la population et le potentiel fiscal expliquent une part importante des dépenses. Cependant, le test de Moran sur les résidus est hautement significatif ($p < 0.001$), confirmant une autocorrélation spatiale non captée. Le modèle MCO est donc incomplet car il ignore les interactions de voisinage, ce qui impose le recours à l'économétrie spatiale.
 
-## Estimation d’un modèle SAR
+# Estimation d’un modèle SAR
 
 Le modèle SAR (Spatial Autoregressive) suppose que les dépenses d'une commune dépendent des dépenses de ses voisines (effet de mimétisme).
 $$y = \rho Wy + X\beta + \varepsilon$$
