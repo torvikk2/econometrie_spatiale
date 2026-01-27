@@ -64,7 +64,8 @@ p_load(
   kableExtra,
   gridExtra,
   texreg,
-  stargazer
+  stargazer,
+  corrplot
 )
 
 # Chargement des datas
@@ -471,6 +472,30 @@ stargazer(vars_x, type = "latex",
 Ce tableau met en évidence la forte hétérogénéité des communes de Bourgogne-Franche-Comté. On observe des disparités marquées, notamment sur le plan social avec un taux de chômage variant de 0 à 38,5 % selon les territoires. La variable touristique ($\textbf{TXX_RSECOCC}$) montre également que certaines communes sont quasi-exclusivement dédiées à la villégiature (jusqu'à 73 % de résidences secondaires), tandis que la moyenne régionale s'établit autour de 13,7 %. Le taux d'endettement moyen ($\textbf{TXX_ENDET}$) est de 0,77, mais atteint des sommets (9,07) pour certaines communes en situation critique. 
 
 ## Statistiques descriptives multivariées 
+
+On vise ici à examiner les relations linéaires entre les variables explicatives avant leur intégration dans les modèles économétriques. L'objectif principal est de détecter d'éventuels problèmes de multicolinéarité.
+En effet, une corrélation trop forte entre deux variables indépendantes rendrait difficile l'estimation précise des coefficients individuels. 
+
+```{r}
+M <- cor(vars_x, use = "complete.obs")
+
+# 2. Affichage graphique
+corrplot(M, method = "color", type = "upper", 
+         addCoef.col = "black",   
+         tl.col = "black",        
+         tl.srt = 45,             
+         number.cex = 0.7,        
+         diag = FALSE)            
+```
+
+L'examen de la matrice graphique permet de valider la cohérence structurelle des variables explicatives retenues pour notre modélisation. Le fait le plus saillant qui se dégage de cette analyse est l'effet d'agglomération massif, illustré par la corrélation extrêmement forte (0,89) entre la population et l'emploi sur place. Ce résultat confirme une réalité économique intuitive : les activités se concentrent mécaniquement là où la densité démographique est la plus élevée. Bien que ce lien soit très marqué, il ne dépasse pas le seuil critique qui empêcherait techniquement l'estimation du modèle, les deux variables conservant une part de variance propre.
+
+En approfondissant l'analyse des dynamiques territoriales, on constate que ces pôles urbains denses et riches en emplois sont également associés à une proportion plus élevée de logements sociaux, comme en témoigne la corrélation positive de 0,60 avec la variable HLM. Cela dessine une hiérarchie territoriale claire où les centres urbains cumulent à la fois la puissance économique et la concentration de l'habitat social, contrairement aux zones périphériques. 
+
+À l'opposé de cette logique urbaine, la variable des résidences secondaires fonctionne comme un miroir inversé. Elle présente des corrélations négatives avec les indicateurs de centralité, ce qui valide l'existence d'une dichotomie territoriale forte. Les communes à vocation touristique ou de villégiature, souvent situées en zone rurale ou de montagne, obéissent à des logiques de développement distinctes de celles des pôles d'emploi.
+
+Enfin, il est intéressant de noter que la santé financière des communes apparaît totalement déconnectée des autres dimensions. Le taux d'endettement présente des corrélations quasi-nulles avec l'ensemble des autres variables, qu'il s'agisse de la richesse, de la taille ou du profil social. Cette indépendance est un atout pour notre modèle, car elle signifie que la dette apporte une information unique et complémentaire pour expliquer les choix d'investissement, sans être redondante avec les autres facteurs.
+
 
 # Estimation d’un modèle de régression linéaire – MCO
 
