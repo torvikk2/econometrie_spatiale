@@ -1,0 +1,501 @@
+---
+title: "Projet d’économétrie spatiale – Région Bourgogne-Franche-Comté"
+author: "Ton nom"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    number_sections: true
+    toc: false
+geometry: margin=2.5cm
+fontsize: 11pt
+---
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  fig.width = 6,
+  fig.height = 5
+)
+
+```
+
+
+
+```{r libraries}
+
+library(pacman)
+p_load(
+  here,
+  sf,
+  spdep,
+  robustHD,
+  mapsf,
+  dplyr,
+  spatialreg,
+  GWmodel,
+  tmap,
+  kableExtra
+)
+
+```
+
+
+
+# Introduction
+
+
+Les données utilisées dans ce projet proviennent de la base fournie dans le cadre du cours et portent sur les communes françaises. Elles sont complétées par un fonds de carte communal permettant une analyse spatiale fine. Conformément aux consignes, l’analyse est menée à l’échelle d’une seule région, la Bourgogne–Franche-Comté. L’appariement entre la base de données et le fonds de carte repose sur les identifiants communaux, assurant la cohérence entre les informations statistiques et leur localisation géographique.
+
+
+## Données et appariement spatial
+
+L’analyse repose sur des données communales appariées à un fonds de carte à l’échelle de la commune. Les données socio-économiques sont issues de la base fournie dans le cadre du cours et le fonds de carte correspond aux contours communaux. Le champ de l’étude est restreint à la région Bourgogne-Franche-Comté. L’appariement est réalisé à l’aide du code INSEE communal.
+```{r data}
+# Chargement de la base de données 
+load("Evaluation/dat.RData")
+
+# Chargement du fonds de carte
+com <- st_read("Evaluation/commune.shp")
+
+# Sélection de la région Bourgogne–Franche-Comté
+datBFC <- subset(dat, dat$REG %in% c("26","43"))
+comBFC <- subset(com, com$CODE_DEP %in% c("21","25","70","39","58","71","90","89"))
+
+# Appariement du fonds de carte et de la base de données
+comBFC <- merge(comBFC, datBFC, by.x = "INSEE_COM", by.y = "CODGEO")
+
+# Nettoyage
+rm(dat, com, datBFC)
+
+
+```
+
+```{r na-check}
+
+sum(is.na(comBFC$lCFT_COM))
+sum(is.na(comBFC$lDIT_COM))
+
+```
+
+Les variables expliquées correspondent aux logarithmes des dépenses communales de fonctionnement et d’investissement par commune. Les variables explicatives incluent notamment la population, l’emploi et la superficie communale, également exprimées en logarithmes. Le choix de ces variables repose sur les déterminants classiques des dépenses publiques locales, tels que décrits dans la littérature et rappelés dans le support de cours.
+
+## Matrices de poids spatiaux
+
+Dans l’analyse économétrique spatiale, la spécification de la matrice de poids est une étape clé, car elle formalise la structure des interactions spatiales entre les unités géographiques.
+
+Dans ce projet, plusieurs matrices de poids sont construites afin de refléter différentes hypothèses sur les mécanismes de dépendance spatiale entre communes. Toutes les matrices sont standardisées en ligne, de sorte que l’influence totale exercée par les voisins d’une commune soit normalisée à un.
+
+Trois approches sont retenues : une matrice de contiguïté d’ordre 1, une matrice basée sur les cinq plus proches voisins, et une matrice définie à partir d’une bande de distance.
+
+
+### 1. Contiguïté d’ordre 1 (Queen)
+
+```{r W-queen, echo = TRUE}
+# Matrice de contiguïté (queen)
+nb_queen <- poly2nb(comBFC, queen = TRUE)
+summary(nb_queen)
+
+# Matrice de poids standardisée en ligne
+W_queen <- nb2listw(nb_queen, style = "W")
+class(W_queen)
+
+```
+D’après le résumé, le voisinage queen produit en moyenne environ 5,9 voisins par commune, avec une hétérogénéité modérée du nombre de voisins selon la géométrie des communes.
+
+### 2. Cinq plus proches voisins (5-NN)
+
+```{r W-knn5}
+# Calcul des centroïdes
+coords <- st_centroid(st_geometry(comBFC))
+
+# 5 plus proches voisins
+knn5 <- knearneigh(coords, k = 5)
+nb_knn5 <- knn2nb(knn5)
+summary(nb_knn5)
+
+# Poids standardisés en ligne
+W_knn5 <- nb2listw(nb_knn5, style = "W")
+```
+Le voisinage 5-NN impose exactement 5 voisins par commune. La liste peut être non symétrique, car la proximité n’est pas forcément réciproque (A peut être dans les 5 plus proches de B sans que B soit dans les 5 plus proches de A).
+
+### 3. Bande de distance (distance band)
+
+Deux communes sont voisines si la distance entre leurs centroïdes est inférieure à un seuil d
+Le seuil est choisi automatiquement pour éviter les communes isolées (au moins un voisin par commune).
+
+```{r W-distanceband}
+
+# Coordonnées des centroïdes sous forme matricielle (x,y)
+coords_xy <- st_coordinates(coords)
+
+# Choix automatique d'une distance seuil : on prend la plus petite distance
+# garantissant au moins 1 voisin pour chaque commune
+dmin <- max(unlist(nbdists(knn2nb(knearneigh(coords_xy, k = 1)), coords_xy)))
+d <- dmin + 1  
+
+# Bande de distance [0, d]
+nb_dist <- dnearneigh(coords_xy, 0, d)
+summary(nb_dist)
+
+# Poids standardisés en ligne
+W_dist <- nb2listw(nb_dist, style = "W")
+
+```
+Cette matrice génère un voisinage plus dense (ici, environ 13,9 voisins en moyenne), ce qui correspond à une interaction spatiale plus diffuse que la contiguïté ou le 5-NN.
+
+
+```{r compare-W, fig.height=5}
+
+diffs_q_dist <- diffnb(nb_queen, nb_dist)
+
+plot(st_geometry(comBFC))
+plot(nb_queen, st_coordinates(coords), add = TRUE)
+
+plot(st_geometry(comBFC))
+plot(diffs_q_dist, st_coordinates(coords), add = TRUE, col = "blue")
+
+```
+### 4. Remarque sur la comparaison entre matrices
+
+Les matrices n’induisent pas la même densité ni la même structure de voisinage. Comparer les résultats obtenus avec plusieurs matrices permet de tester la robustesse des conclusions aux choix de spécification spatiale. La suite de l’analyse mobilise ces matrices pour mesurer l’autocorrélation spatiale (Moran global et indicateurs locaux) puis estimer des modèles économétriques spatiaux.
+
+
+## 3. Analyse descriptive des variables expliquées
+
+Cette section porte sur :
+
+lCFT_COM : log dépenses de fonctionnement
+lDIT_COM : log dépenses d’investissement
+
+
+### 3.1 Cartographie des dépenses communales
+
+Cette section propose une analyse exploratoire spatiale des dépenses communales de fonctionnement et d’investissement. Une première étape consiste à cartographier ces variables afin d’identifier d’éventuelles structures spatiales et des contrastes territoriaux à l’échelle régionale.
+
+
+```{r}
+tm_shape(comBFC) +
+  tm_polygons("lDIT_COM", border.col=NA, style="quantile", n=5,
+              title="Log dépenses d’investissement", textNA="")
+
+tm_shape(comBFC) +
+  tm_polygons("lCFT_COM", border.col=NA, style="quantile", n=5,
+              title="Log dépenses de fonctionnement", textNA="")
+
+```
+
+Les cartes présentent la distribution spatiale des dépenses communales de fonctionnement et d’investissement dans la région Bourgogne-Franche-Comté. Ces représentations permettent d’identifier des contrastes territoriaux et suggèrent l’existence de structures spatiales, sans préjuger de leur significativité statistique. Quelques communes présentent des valeurs manquantes et apparaissent comme telles sur les cartes.
+
+### 3.2 Statistiques descriptives
+
+Nous allons présenté des statistiques descriptives afin de caractériser la distribution des dépenses communales dans la région étudiée
+
+
+```{r}
+library(kableExtra)
+
+desc_stats <- data.frame(
+  Variable = c("Dépenses de fonctionnement", "Dépenses d’investissement"),
+  Moyenne = c(mean(comBFC$lCFT_COM), mean(comBFC$lDIT_COM)),
+  Médiane = c(median(comBFC$lCFT_COM), median(comBFC$lDIT_COM)),
+  Écart_type = c(sd(comBFC$lCFT_COM), sd(comBFC$lDIT_COM)),
+  Minimum = c(min(comBFC$lCFT_COM), min(comBFC$lDIT_COM)),
+  Maximum = c(max(comBFC$lCFT_COM), max(comBFC$lDIT_COM))
+)
+desc_stats %>%
+  kable(
+    caption = "Statistiques descriptives des dépenses communales (logarithmes)",
+    digits = 2,
+    align = "c"
+  ) %>%
+  kable_styling(
+    latex_options = c("hold_position", "striped"),
+    full_width = FALSE
+  )
+```
+
+D’après ces résultats, la distribution des dépenses de fonctionnement apparaît relativement symétrique, avec un écart-type faible, ce qui suggère des niveaux de dépenses plus stables entre les communes. En revanche, les dépenses d’investissement présentent une plus forte hétérogénéité, comme en témoigne un écart-type plus élevé. La présence d’un minimum nul reflète l’absence de dépenses d’investissement pour certaines communes. Cette variabilité peut s’expliquer par des différences de taille communale et par les modalités de prise en charge de l’investissement public, notamment au niveau intercommunal, certaines dépenses pouvant être mutualisées.
+
+### 3.3 Autocorrélation spatiale globale (I de Moran)
+
+À ce stade de l'étude, nous allons étudier l'existence de corrélation spatiale entre les niveaux des dépenses des communes. Pour cela nous allons utiliser le test global de Moran.
+
+#### 3.3.1. test global de Moran des dépenses de fonctionnement
+
+Afin de tester l’existence d’une autocorrélation spatiale globale des dépenses communales, on calcule l’indice de Moran en utilisant la matrice de contiguïté d’ordre 1 standardisée en ligne.
+
+```{r}
+y_fonc <- comBFC$lCFT_COM
+
+# I de Moran théorique
+moran_fonc <- moran(
+  y_fonc,
+  W_queen,
+  length(y_fonc),
+  Szero(W_queen)
+)
+
+set.seed(123)
+moran_fonc_mc <- moran.mc(y_fonc, W_queen, nsim = 999)
+moran_fonc_mc
+
+```
+
+Les résultats du test global de Moran mettent en évidence une autocorrélation spatiale positive et statistiquement significative (p-value < 0.05) des dépenses de fonctionnement communales. La valeur élevée de l’indice de Moran (I = 0.318) indique que les communes présentant des niveaux de dépenses de fonctionnement similaires tendent à se regrouper spatialement. Ce résultat suggère l’existence de dépendances spatiales marquées dans les dépenses de fonctionnement à l’échelle communale.
+
+
+#### 3.3.2. test global de Moran des dépenses d'investissement
+
+```{r}
+y_inv <- comBFC$lDIT_COM
+
+moran_inv <- moran(
+  y_inv,
+  W_queen,
+  length(y_inv),
+  Szero(W_queen)
+)
+
+set.seed(123)
+moran_inv_mc <- moran.mc(y_inv, W_queen, nsim = 999)
+moran_inv_mc
+
+```
+Concernant les dépenses d’investissement, l’indice de Moran est également positif et statistiquement significatif (p-value < 0.05). La valeur de l'indice de Moran est néanmoins plus faible (I = 0.072). Cela indique la présence d’une autocorrélation spatiale globale modérée des dépenses d’investissement, suggérant que les communes aux comportements d’investissement similaires ont tendance à être spatialement proches, mais de manière moins marquée que pour les dépenses de fonctionnement.
+
+La mise en évidence d’une autocorrélation spatiale globale justifie l’analyse des structures locales d’autocorrélation afin d’identifier précisément les zones de concentration ou de rupture spatiale des dépenses communales.
+
+### 3.4 Autocorrélation spatiale locale : statistiques LISA
+
+####  Objectif
+
+Après avoir mis en évidence l’existence d’une autocorrélation spatiale globale des dépenses communales, cette section vise à identifier les structures locales d’autocorrélation.
+Les statistiques LISA (Local Indicators of Spatial Association) permettent de repérer les clusters spatiaux significatifs et les valeurs atypiques locales, à partir de l’indice de Moran local.
+
+L’analyse est réalisée à l’aide de la matrice de contiguïté d’ordre 1 standardisée en ligne, cohérente avec le test global précédent.
+
+#### 3.4.1 LISA – Dépenses de fonctionnement
+```{r}
+## --- Standardisation de la variable ---
+y_fonc_std <- as.numeric(standardize(comBFC$lCFT_COM))
+
+## --- Variable spatiale décalée ---
+lag_y_fonc <- lag.listw(W_queen, y_fonc_std)
+
+## --- Calcul de l'indice de Moran local ---
+lisa_fonc <- localmoran(y_fonc_std, W_queen)
+
+## --- Création du data.frame de travail ---
+comBFC$lisa_I_fonc <- lisa_fonc[,1]
+comBFC$lisa_p_fonc <- lisa_fonc[,5]
+comBFC$lag_y_fonc  <- lag_y_fonc
+
+## --- Classification des clusters LISA ---
+comBFC$cluster_fonc <- "Non significatif"
+alpha <- 0.01
+
+comBFC$cluster_fonc[
+  y_fonc_std >= 0 & lag_y_fonc >= 0 & comBFC$lisa_p_fonc <= alpha
+] <- "Haut-Haut"
+
+comBFC$cluster_fonc[
+  y_fonc_std <= 0 & lag_y_fonc <= 0 & comBFC$lisa_p_fonc <= alpha
+] <- "Bas-Bas"
+
+comBFC$cluster_fonc[
+  y_fonc_std >= 0 & lag_y_fonc <= 0 & comBFC$lisa_p_fonc <= alpha
+] <- "Haut-Bas"
+
+comBFC$cluster_fonc[
+  y_fonc_std <= 0 & lag_y_fonc >= 0 & comBFC$lisa_p_fonc <= alpha
+] <- "Bas-Haut"
+
+comBFC$cluster_fonc <- factor(
+  comBFC$cluster_fonc,
+  levels = c("Haut-Haut","Bas-Bas","Haut-Bas","Bas-Haut","Non significatif")
+)
+
+
+mf_theme("agolalight", fg = "black")
+mf_map(
+  comBFC,
+  var = "cluster_fonc",
+  type = "typo",
+  pal = c("red", "blue", "orange", "lightblue", "white"),
+  leg_title = "LISA – Dépenses de fonctionnement",
+  leg_pos = "topright",
+  border = "grey70"
+)
+mf_title("LISA – Dépenses de fonctionnement", font = 4, bg = "white", fg = "black")
+mf_credits("Sources : données projet", bg = "white", col = "black", cex = .9)
+mf_scale(size = 20, cex = .9, col = "black")
+mf_arrow("topleft", col = "black")
+
+
+```
+
+La carte des statistiques LISA appliquées aux dépenses de fonctionnement met en évidence l’existence de clusters spatiaux localisés. Des regroupements de communes caractérisées par des niveaux élevés de dépenses de fonctionnement, entourées de communes aux profils similaires (clusters Haut–Haut), apparaissent principalement autour de certains pôles territoriaux. À l’inverse, des clusters de faibles dépenses (Bas–Bas) se concentrent davantage dans des zones à dominante rurale.
+
+Néanmoins, le nombre de clusters significatifs demeure relativement limité. La majorité des communes n’appartient à aucun cluster statistiquement significatif au seuil de 1 %, ce qui indique que l’autocorrélation spatiale des dépenses de fonctionnement, bien que présente, reste essentiellement localisée et ne concerne qu’une partie restreinte du territoire régional.
+
+#### 3.4.2 LISA – Dépenses d'investissement
+```{r}
+
+## --- Standardisation de la variable ---
+y_inv_std <- as.numeric(standardize(comBFC$lDIT_COM))
+
+## --- Variable spatiale décalée (lag spatial) ---
+lag_y_inv <- lag.listw(W_queen, y_inv_std)
+
+## --- Calcul de l'indice de Moran local ---
+lisa_inv <- localmoran(y_inv_std, W_queen)
+
+## --- Stockage des résultats dans l'objet sf ---
+comBFC$lisa_I_inv <- lisa_inv[, 1]
+comBFC$lisa_p_inv <- lisa_inv[, 5]
+comBFC$lag_y_inv  <- lag_y_inv
+
+## --- Classification des clusters LISA ---
+comBFC$cluster_inv <- "Non significatif"
+alpha <- 0.01
+
+comBFC$cluster_inv[
+  y_inv_std >= 0 & lag_y_inv >= 0 & comBFC$lisa_p_inv <= alpha
+] <- "Haut-Haut"
+
+comBFC$cluster_inv[
+  y_inv_std <= 0 & lag_y_inv <= 0 & comBFC$lisa_p_inv <= alpha
+] <- "Bas-Bas"
+
+comBFC$cluster_inv[
+  y_inv_std >= 0 & lag_y_inv <= 0 & comBFC$lisa_p_inv <= alpha
+] <- "Haut-Bas"
+
+comBFC$cluster_inv[
+  y_inv_std <= 0 & lag_y_inv >= 0 & comBFC$lisa_p_inv <= alpha
+] <- "Bas-Haut"
+
+comBFC$cluster_inv <- factor(
+  comBFC$cluster_inv,
+  levels = c("Haut-Haut", "Bas-Bas", "Haut-Bas", "Bas-Haut", "Non significatif")
+)
+
+## --- Carte LISA investissement ---
+mf_theme("agolalight", fg = "black")
+mf_map(
+  comBFC,
+  var = "cluster_inv",
+  type = "typo",
+  pal = c("red", "blue", "orange", "lightblue", "white"),
+  leg_title = "LISA – Dépenses d’investissement",
+  leg_pos = "topright",
+  border = "grey70"
+)
+mf_title("LISA – Dépenses d’investissement", font = 4, bg = "white", fg = "black")
+mf_credits("Sources : données projet", bg = "white", col = "black", cex = .9)
+mf_scale(size = 20, cex = .9, col = "black")
+mf_arrow("topleft", col = "black")
+
+```
+La carte des statistiques LISA appliquées aux dépenses d’investissement met également en évidence la présence de clusters spatiaux, bien que leur structure diffère de celle observée pour les dépenses de fonctionnement. Les clusters Haut–Haut apparaissent de manière plus ponctuelle et semblent davantage concentrés dans certaines zones spécifiques du territoire.
+
+Les clusters Bas–Bas, bien que présents, restent relativement dispersés et concernent un nombre limité de communes. Comme pour les dépenses de fonctionnement, la majorité des communes ne présente pas d’autocorrélation spatiale locale significative au seuil de 1 %, ce qui suggère que les dépenses d’investissement sont plus hétérogènes spatialement et moins systématiquement structurées par des effets de voisinage.
+
+
+## 4. Analyse descriptive des variables explicatives
+
+### 4.1 Signes attendus des variables explicatives
+
+Avant de procéder à la cartographie et à l’analyse descriptive des variables explicatives, il convient de préciser les signes attendus de ces variables sur les dépenses communales. Cette étape vise à formuler des hypothèses de sens fondées sur des considérations économiques et institutionnelles liées au fonctionnement des finances locales, ainsi que sur la distinction entre dépenses de fonctionnement et dépenses d’investissement (voir section Définition des variables).
+
+Ces hypothèses ne préjugent pas des résultats économétriques, mais constituent un cadre de référence nécessaire à leur interprétation ultérieure.
+
+*Variables démographiques et économiques*
+
+La population municipale (lPMUN) est susceptible d’influencer positivement le niveau des dépenses communales. Une population plus importante implique en effet des besoins accrus en services publics locaux, en personnel communal et en équipements collectifs. Le signe attendu est donc positif pour les dépenses de fonctionnement comme pour les dépenses d’investissement.
+
+Le nombre d’emplois au lieu de travail (lEMPLT) reflète le degré d’activité économique du territoire communal. Une activité économique plus dense peut générer des charges supplémentaires pour la collectivité, notamment en matière d’infrastructures, d’aménagements et de services. Un signe positif est ainsi attendu pour les deux types de dépenses.
+
+*Variables spatiales et caractéristiques physiques du territoire*
+
+La superficie communale (lSUPERF) peut constituer un facteur de hausse des dépenses, dans la mesure où un territoire plus étendu est susceptible d’entraîner des coûts plus élevés d’entretien et d’équipement, en particulier pour la voirie et les réseaux. Un signe positif est donc attendu, notamment pour les dépenses d’investissement.
+
+La surface urbanisée à usage résidentiel (lsurfres) traduit le niveau de pression exercée sur les services publics locaux. Une urbanisation résidentielle plus importante peut accroître les besoins en équipements collectifs et en infrastructures. Le signe attendu est positif.
+
+La surface urbanisée dédiée aux activités économiques (lsurfact) est également susceptible d’influencer les dépenses communales. La présence d’activités économiques peut nécessiter des investissements spécifiques et générer des dépenses de fonctionnement supplémentaires. Un signe positif est attendu.
+
+*Variables sociales et structure du logement*
+
+La part des personnes âgées (TXX_SEUL65P) peut être associée à une augmentation des dépenses de fonctionnement, notamment en lien avec l’action sociale et les services à la population. Le signe attendu est donc positif, principalement pour les dépenses de fonctionnement.
+
+La part des logements sociaux (TXX_RP_LOCHLMV) peut également être corrélée à des besoins accrus en services publics et en politiques sociales locales. Un signe positif est attendu, en particulier pour les dépenses de fonctionnement.
+
+Le taux de logements vacants (TXX_LOGVAC) peut refléter une moindre attractivité du territoire communal et, par conséquent, une pression plus faible sur les services publics. Le signe attendu est négatif, bien que l’effet puisse être ambigu selon les contextes territoriaux.
+
+*Variables financières*
+
+L’annuité de la dette (ANNUITE_COM) constitue une contrainte budgétaire susceptible de limiter les marges de manœuvre financières des communes. Une charge de dette plus élevée peut notamment restreindre la capacité d’investissement. Un signe négatif est attendu sur les dépenses d’investissement.
+
+Le taux d’endettement (TXX_ENDET) peut également limiter la capacité future des communes à financer de nouveaux projets. Un signe négatif est attendu sur les dépenses d’investissement.
+
+### 4.2 Cartographie de certaines variables explicatives
+
+Afin de compléter l’analyse descriptive, une cartographie de certaines variables explicatives est proposée. Les variables retenues ont été sélectionnées en raison de leur importance dans l’explication des dépenses communales et de leur capacité à mettre en évidence des contrastes spatiaux à l’échelle communale.
+
+La cartographie porte en particulier sur des variables démographiques et économiques, telles que la population municipale et les emplois au lieu de travail, ainsi que sur des variables décrivant l’urbanisation du territoire, notamment les surfaces urbanisées résidentielles et dédiées aux activités économiques. Des variables sociales, comme la part des logements sociaux et la part des personnes âgées, sont également représentées afin de rendre compte des disparités sociales susceptibles d’influencer les besoins de dépenses publiques locales.
+
+Ces variables sont susceptibles de présenter une hétérogénéité spatiale marquée et constituent des déterminants structurels importants des dépenses communales. À ce titre, leur représentation cartographique permet d’identifier d’éventuelles concentrations spatiales, gradients territoriaux ou oppositions entre communes, sans préjuger des relations causales qui seront examinées ultérieurement dans le cadre de l’analyse économétrique. En ce sens l’objectif de ces cartes est uniquement exploratoire. Elles permettent de visualiser les structures territoriales et de préparer l’analyse économétrique.
+
+
+Plus précisément, nous retenons :
+- la population communale, qui reflète la taille de la commune et conditionne mécaniquement
+  le niveau des dépenses publiques ;
+- l’emploi, indicateur de l’activité économique locale et de la pression exercée sur les
+  services publics ;
+- la superficie communale, qui influence notamment les coûts d’entretien, d’équipement
+  et de gestion du territoire.
+
+Ces variables sont cartographiées sous forme de classes de quantiles, afin de faciliter
+la comparaison entre communes et de mettre en évidence les contrastes spatiaux au sein
+de la région Bourgogne–Franche-Comté.
+
+#### 4.2.1. Cartographie de la population communale
+```{r}
+### 4.2.1 Population communale
+
+mf_theme("agolalight", fg = "black")
+
+mf_map(
+  comBFC,
+  var = "lPMUN",
+  type = "choro",
+  method = "quantile",
+  n = 5,
+  pal = "Blues",
+  leg_title = "Log population communale",
+  leg_pos = "topright",
+  border = "grey70"
+)
+
+
+
+mf_title("Population communale (log)", font = 4, bg = "white", fg = "black")
+mf_credits("Sources : données du projet", bg = "white", col = "black", cex = .9)
+mf_scale(size = 20, cex = .9, col = "black")
+mf_arrow("topleft", col = "black")
+
+
+```
+
+La carte de la population communale met en évidence une forte hétérogénéité spatiale au sein de la région Bourgogne–Franche-Comté. Les communes les plus peuplées se concentrent principalement autour des principaux pôles urbains, tandis que de nombreuses communes rurales présentent des effectifs de population plus faibles.
+
+Cette répartition illustre la structure territoriale de la région, caractérisée par un contraste marqué entre espaces urbains, périurbains et ruraux. Les zones urbaines regroupent une part importante de la population, alors que les territoires ruraux restent plus faiblement peuplés et dispersés.
+
+La population constitue ainsi une variable centrale dans l’analyse des dépenses communales, dans la mesure où elle influence directement les besoins en services publics, en équipements et en infrastructures locales. Une population plus élevée est généralement associée à des niveaux de dépenses plus importants, tant en fonctionnement qu’en investissement.
+
+La cartographie de cette variable permet donc de visualiser les contrastes territoriaux existants et fournit un premier éclairage sur les disparités spatiales susceptibles d’influencer les niveaux de dépenses communales étudiées par la suite.
+
