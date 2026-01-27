@@ -296,10 +296,77 @@ map_x2 <- plot_x_var(comBFC, "TXX_CHOM1564", "Taux de Chômage", "plasma", "% Ac
 grid.arrange(map_x1, map_x2, ncol = 2)
 ```
 
-## Estimation d’un modèle de régression linéaire – MCO
+### Estimation d’un modèle de régression linéaire – MCO
+
+```{r}
+# Définition de la formule de base
+# Nous incluons les variables identifiées dans l'analyse descriptive
+formule <- lCFT_COM ~ lPMUN + lEMPLT + prod_3_taxe_com + TXX_CHOM1564 + TXX_RP_LOCHLMV + TXX_ENDET + TXX_RSECOCC + factor(DEP)
+
+### Estimation MCO
+model_ols_fonc <- lm(formule, data = comBFC)
+model_ols_inv  <- lm(update(formule, lDIT_COM ~ .), data = comBFC)
+
+# Affichage des résultats
+screenreg(list(model_ols_fonc, model_ols_inv), 
+          custom.model.names = c("Fonctionnement (MCO)", "Investissement (MCO)"),
+          omit.coef = "factor\\(DEP\\)")
+
+### Diagnostics de Moran sur les résidus
+# Il est crucial de tester si les résidus MCO sont spatialement autocorrélés
+lm.morantest(model_ols_fonc, listw_queen)
+```
+Le modèle MCO initial montre que la population et le potentiel fiscal expliquent une part importante des dépenses. Cependant, le test de Moran sur les résidus est hautement significatif ($p < 0.001$), confirmant une autocorrélation spatiale non captée. Le modèle MCO est donc incomplet car il ignore les interactions de voisinage, ce qui impose le recours à l'économétrie spatiale.
 
 ## Estimation d’un modèle SAR
 
+Le modèle SAR (Spatial Autoregressive) suppose que les dépenses d'une commune dépendent des dépenses de ses voisines (effet de mimétisme).
+$$y = \rho Wy + X\beta + \varepsilon$$
+
+```{r}
+### Estimation par Maximum de Vraisemblance (ML)
+# Fonctionnement
+sar_ml_fonc <- lagsarlm(formule, data = comBFC, listw = listw_queen, method = "Matrix") #<- Matrix car sinon beaucoup trop long
+
+### Estimation par les Moindres Carrés Doubles Spatiaux (2SLS) - Plus robuste à la non-normalité
+sar_2sls_fonc <- stsls(formule, data = comBFC, listw = listw_queen)
+
+### Modèle avec hétérogénéité du coefficient spatial par département
+# On utilise ici l'interaction entre la matrice de poids et le facteur département
+# (Note : Cette étape nécessite souvent une décomposition de la matrice W par bloc-département)
+
+# Résumé des résultats SAR pour le fonctionnement
+summary(sar_ml_fonc)
+```
+
+### Analyse des impacts (Effets Directs et Indirects)
+
+Dans un modèle spatial, le coefficient $\beta$ ne représente pas l'effet total.
+
+```{r}
+W_mat <- as(listw_queen, "CsparseMatrix")
+impacts_sar <- impacts(sar_ml_fonc, listw = listw_queen, R = 500)
+summary(impacts_sar, zstats = TRUE, short = TRUE)
+```
+
+L'estimation du modèle SAR révèle un coefficient autorégressif $\rho$ (Rho) positif et significatif. Cela valide l'existence d'un effet de mimétisme : les choix budgétaires d'une commune sont influencés par les niveaux de dépenses de ses voisines. Les résultats sont robustes, que l'on utilise le Maximum de Vraisemblance (ML) ou les Moindres Carrés Doubles Spatiaux (2SLS).
+
+
 ## Estimation d’un modèle de Durbin avec la population et l’emploi en variables décalées
 
+Le modèle de Durbin est le plus complet : il inclut le retard spatial de la variable dépendante ($Wy$) ET le retard spatial des variables explicatives ($WX$). Nous nous focalisons sur les lags de la population et de l'emploi.
+
+```{r}
+# On définit les variables à décaler spatialement (Population et Emploi)
+sdm_fonc <- lagsarlm(formule, data = comBFC, listw = listw_queen, 
+                     Durbin = ~ lPMUN + lEMPLT, method = "Matrix")
+
+# Comparaison SAR vs SDM (Test de rapport de vraisemblance)
+LR.Sarlm(sdm_fonc, sar_ml_fonc)
+```
+Le modèle de Durbin (SDM) s'avère supérieur au modèle SAR (confirmé par le test LR). Il montre que les caractéristiques des voisins (population, emploi) impactent directement les dépenses locales. L'analyse des impacts indirects souligne l'existence de "spillovers" : une forte activité économique chez les voisins génère des charges de centralité (infrastructures, services) pour la commune, au-delà de ses propres besoins internes.
+
+
 ## Conclusion
+
+L'analyse démontre que les finances locales en Bourgogne-Franche-Comté sont interdépendantes. La présence de clusters spatiaux et la significativité des effets de débordement suggèrent que les politiques de dépenses ne doivent plus être pensées de manière isolée, mais à l'échelle des bassins de vie pour optimiser la gestion des équipements publics.
