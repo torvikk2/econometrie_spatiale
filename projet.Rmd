@@ -299,7 +299,6 @@ grid.arrange(map_x1, map_x2, ncol = 2)
 ### Estimation d’un modèle de régression linéaire – MCO
 
 ```{r}
-# Définition de la formule de base
 # Nous incluons les variables identifiées dans l'analyse descriptive
 formule <- lCFT_COM ~ lPMUN + lEMPLT + prod_3_taxe_com + TXX_CHOM1564 + TXX_RP_LOCHLMV + TXX_ENDET + TXX_RSECOCC + factor(DEP)
 
@@ -313,7 +312,6 @@ screenreg(list(model_ols_fonc, model_ols_inv),
           omit.coef = "factor\\(DEP\\)")
 
 ### Diagnostics de Moran sur les résidus
-# Il est crucial de tester si les résidus MCO sont spatialement autocorrélés
 lm.morantest(model_ols_fonc, listw_queen)
 ```
 Le modèle MCO initial montre que la population et le potentiel fiscal expliquent une part importante des dépenses. Cependant, le test de Moran sur les résidus est hautement significatif ($p < 0.001$), confirmant une autocorrélation spatiale non captée. Le modèle MCO est donc incomplet car il ignore les interactions de voisinage, ce qui impose le recours à l'économétrie spatiale.
@@ -325,15 +323,10 @@ $$y = \rho Wy + X\beta + \varepsilon$$
 
 ```{r}
 ### Estimation par Maximum de Vraisemblance (ML)
-# Fonctionnement
 sar_ml_fonc <- lagsarlm(formule, data = comBFC, listw = listw_queen, method = "Matrix") #<- Matrix car sinon beaucoup trop long
 
 ### Estimation par les Moindres Carrés Doubles Spatiaux (2SLS) - Plus robuste à la non-normalité
 sar_2sls_fonc <- stsls(formule, data = comBFC, listw = listw_queen)
-
-### Modèle avec hétérogénéité du coefficient spatial par département
-# On utilise ici l'interaction entre la matrice de poids et le facteur département
-# (Note : Cette étape nécessite souvent une décomposition de la matrice W par bloc-département)
 
 # Résumé des résultats SAR pour le fonctionnement
 summary(sar_ml_fonc)
