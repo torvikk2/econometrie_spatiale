@@ -1,0 +1,831 @@
+---
+title: "Évaluation - Économétrie Spatiale"
+author: "Victor Frison, Jonas Carlu, Adrien Mathieu, Fouad Afane"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    highlight: tango          # Coloration syntaxique du code plus jolie
+    df_print: kable           # Affichage par défaut des tableaux
+header-includes:
+  - \usepackage{geometry}
+  - \geometry{left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm} # Marges aérées
+  - \usepackage{xcolor}
+  - \definecolor{bleu_univ}{RGB}{44, 62, 80} # Un bleu gris sombre élégant
+  - \definecolor{rouge_lien}{RGB}{200, 0, 0}
+  - \usepackage{sectsty}
+  - \sectionfont{\color{bleu_univ}\sffamily}  # Titres en bleu et sans empattement
+  - \subsectionfont{\color{bleu_univ}\sffamily}
+  - \usepackage{fancyhdr}     # Pour les en-têtes et pieds de page
+  - \pagestyle{fancy}
+  - \fancyhead[L]{Économétrie Spatiale}
+  - \fancyhead[R]{\thepage}
+  - \usepackage{hyperref}     # Liens cliquables propres
+  - \hypersetup{colorlinks=true, linkcolor=bleu_univ, urlcolor=rouge_lien}
+  - \usepackage{float}        # Pour forcer le placement des images
+  - \floatplacement{figure}{H} 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,          # Affiche le code
+  message = FALSE,      # Cache les messages de chargement
+  warning = FALSE,      # Cache les warnings
+  
+  #--- Gestion des figures ---#
+  fig.align = "center", # Centre toutes les images
+  fig.pos = "H",        # Force l'image à rester LA où vous l'avez mise dans le code
+  out.width = "90%",    # L'image prend 90% de la largeur de la page (très propre)
+  fig.width = 8,        # Largeur de base plus grande pour la lisibilité
+  fig.height = 6,       
+  dpi = 300,            # Haute résolution (indispensable pour les cartes !)
+  
+  #--- Gestion du code ---#
+  comment = ">",       # Rend les sorties console plus jolies
+  background = "#F7F7F7" # Gris très léger derrière le code pour le détacher
+)
+
+rm(list=ls())
+
+library(pacman)
+p_load(
+  here,
+  sf,
+  spdep,
+  robustHD,
+  mapsf,
+  dplyr,
+  spatialreg,
+  GWmodel,
+  tmap,
+  kableExtra,
+  gridExtra,
+  texreg
+)
+
+# Chargement des datas
+comBFC <- readRDS("comBFC.RDS")
+```
+
+\newpage
+
+# Introduction
+
+Ce projet a pour objectif d'analyser les déterminants des dépenses publiques locales au sein de la région **Bourgogne-Franche-Comté**. Nous nous intéressons particulièrement aux mécanismes d'interaction spatiale qui peuvent exister entre les communes, sous l'hypothèse que les choix budgétaires d'une commune sont influencés par ceux de ses voisines (phénomènes de mimétisme, concurrence fiscale ou effets de débordement).
+
+L'étude porte sur les données de l'année 2019. Nous analyserons deux variables dépendantes distinctes :
+1.  Les **dépenses de fonctionnement** par tête.
+2.  Les **dépenses d'investissement** par tête.
+
+La méthodologie adoptée suit une approche progressive :
+* Une analyse exploratoire des données spatiales (ESDA) pour détecter l'autocorrélation spatiale.
+* Une estimation par les Moindres Carrés Ordinaires (MCO) comme point de référence.
+* La mise en œuvre de modèles d'économétrie spatiale, notamment le modèle autorégressif spatial (SAR) et le modèle de Durbin spatial (SDM), pour quantifier les effets directs et indirects.
+
+# Construction de la matrice de poids
+
+Dans l’analyse économétrique spatiale, la spécification de la matrice de poids est une étape clé, car elle formalise la structure des interactions spatiales entre les unités géographiques.
+
+Dans ce projet, plusieurs matrices de poids sont construites afin de refléter différentes hypothèses sur les mécanismes de dépendance spatiale entre communes. Toutes les matrices sont standardisées en ligne, de sorte que l’influence totale exercée par les voisins d’une commune soit normalisée à un.
+
+Trois approches sont retenues : une matrice de contiguïté d’ordre 1, une matrice basée sur les cinq plus proches voisins, et une matrice définie à partir d’une bande de distance.
+
+## Préparation des coordonnées
+
+Certaines méthodes (comme les plus proches voisins) nécessitent les centroïdes des communes.
+
+```{r coords}
+coords <- st_coordinates(st_centroid(comBFC))
+```
+
+## Matrice de contiguïté à l'ordre 1
+
+```{r contiguite}
+# Création de la liste des voisins (Queen)
+nb_queen <- poly2nb(comBFC, queen = TRUE)
+summary(nb_queen)
+
+# Matrice de poids standardisée en ligne
+w_queen <- nb2listw(nb_queen, style = "W", zero.policy = TRUE)
+```
+
+D’après le résumé, le voisinage queen produit en moyenne environ 5,9 voisins par commune, avec une hétérogénéité modérée du nombre de voisins selon la géométrie des communes.
+
+## Matrice des 5 plus proches voisins
+
+Cette matrice considère deux communes comme voisines si elles partagent une frontière ou un simple point (sommet).
+
+```{r knn5}
+# Identification des 5 voisins les plus proches
+knn5 <- knearneigh(coords, k = 5)
+# Conversion en objet 'nb' (voisins)
+nb_knn5 <- knn2nb(knn5)
+# Poids standardisés en ligne
+w_knn5 <- nb2listw(nb_knn5, style = "W")
+w_knn5$neighbours
+```
+
+Le voisinage 5-NN impose exactement 5 voisins par commune. La liste peut être non symétrique, car la proximité n’est pas forcément réciproque (A peut être dans les 5 plus proches de B sans que B soit dans les 5 plus proches de A).
+
+##  Bande de distance (distance band)
+
+Deux communes sont voisines si la distance entre leurs centroïdes est inférieure à un seuil d
+Le seuil est choisi automatiquement pour éviter les communes isolées (au moins un voisin par commune).
+
+```{r W-distanceband}
+# Choix automatique d'une distance seuil : on prend la plus petite distance
+# garantissant au moins 1 voisin pour chaque commune
+dmin <- max(unlist(nbdists(knn2nb(knearneigh(coords, k = 1)), coords)))
+d <- dmin + 1  
+
+# Bande de distance [0, d]
+nb_dist <- dnearneigh(coords, 0, d)
+summary(nb_dist)
+
+# Poids standardisés en ligne
+W_dist <- nb2listw(nb_dist, style = "W")
+```
+
+Cette matrice génère un voisinage plus dense (ici, environ 13,9 voisins en moyenne), ce qui correspond à une interaction spatiale plus diffuse que la contiguïté ou le 5-NN.
+
+## Visualisation des connexions
+
+```{r visu, echo=FALSE}
+par(mfrow = c(1, 2), mar = c(0,0,1,0))
+
+# Carte des liens de contiguïté
+plot(st_geometry(comBFC), border = "grey", main = "Contiguïté (Queen)")
+plot(nb_queen, coords, add = TRUE, col = "red", lwd = 0.5, pch = ".")
+
+# Carte des liens k=5 voisins
+plot(st_geometry(comBFC), border = "grey", main = "5 Plus Proches Voisins")
+plot(nb_knn5, coords, add = TRUE, col = "blue", lwd = 0.5, pch = ".")
+```
+
+## Remarque sur la comparaison entre matrices
+
+Les matrices n’induisent pas la même densité ni la même structure de voisinage. Comparer les résultats obtenus avec plusieurs matrices permet de tester la robustesse des conclusions aux choix de spécification spatiale. La suite de l’analyse mobilise ces matrices pour mesurer l’autocorrélation spatiale (Moran global et indicateurs locaux) puis estimer des modèles économétriques spatiaux.
+
+# Analyse descriptive des variables expliquées
+
+Cette section se concentre sur les deux variables expliquées du projet :
+1.  **Dépenses de fonctionnement** (variable `lCFT_COM`)
+2.  **Dépenses d'investissement** (variable `lDIT_COM`)
+
+*Ces deux variables sont en échelle logarithmique, avec l'unité euros/hab.*
+
+## Cartographie des dépenses
+
+Cette section propose une analyse exploratoire spatiale des dépenses communales de fonctionnement et d’investissement. Une première étape consiste à cartographier ces variables afin d’identifier d’éventuelles structures spatiales et des contrastes territoriaux à l’échelle régionale.
+
+```{r, echo=FALSE}
+map_y1 <- tm_shape(comBFC) +
+  tm_polygons(fill = "lCFT_COM",
+              col = NA,
+              fill.scale = tm_scale_intervals(n = 5, style = "quantile", values = "magma", label.na = ""),
+              fill.legend = tm_legend(title = "Log €/hab")) +
+  tm_title("Dépenses de Fonctionnement") +
+  tm_layout(frame = FALSE, legend.outside = TRUE)
+
+map_y2 <- tm_shape(comBFC) +
+  tm_polygons(fill = "lDIT_COM",
+              col = NA,
+              fill.scale = tm_scale_intervals(n = 5, style = "quantile", values = "viridis", label.na = ""),
+              fill.legend = tm_legend(title = "Log €/hab")) +
+  tm_title("Dépenses d'Investissement") +
+  tm_layout(frame = FALSE, legend.outside = TRUE)
+
+tmap_arrange(map_y1, map_y2, ncol = 2)
+```
+
+Les cartes présentent la distribution spatiale des dépenses communales de fonctionnement et d’investissement dans la région Bourgogne-Franche-Comté. Ces représentations permettent d’identifier des contrastes territoriaux et suggèrent l’existence de structures spatiales, sans préjuger de leur significativité statistique. Quelques communes présentent des valeurs manquantes et apparaissent comme telles sur les cartes.
+
+## Statistiques descriptives
+
+Nous présentons ici des statistiques descriptives afin de caractériser la distribution des dépenses communales dans la région étudiée (tendance centrale, dispersion).
+
+```{r desc_y, echo=FALSE}
+# Calcul des statistiques
+desc_stats <- data.frame(
+  Variable = c("Dépenses de fonctionnement (log)", "Dépenses d’investissement (log)"),
+  Moyenne = c(mean(comBFC$lCFT_COM, na.rm = TRUE), mean(comBFC$lDIT_COM, na.rm = TRUE)),
+  Médiane = c(median(comBFC$lCFT_COM, na.rm = TRUE), median(comBFC$lDIT_COM, na.rm = TRUE)),
+  Écart_type = c(sd(comBFC$lCFT_COM, na.rm = TRUE), sd(comBFC$lDIT_COM, na.rm = TRUE)),
+  Minimum = c(min(comBFC$lCFT_COM, na.rm = TRUE), min(comBFC$lDIT_COM, na.rm = TRUE)),
+  Maximum = c(max(comBFC$lCFT_COM, na.rm = TRUE), max(comBFC$lDIT_COM, na.rm = TRUE))
+)
+
+# Affichage du tableau
+desc_stats %>%
+  kable(
+    caption = "Statistiques descriptives des dépenses communales (logarithmes)",
+    digits = 2,
+    align = "c"
+  ) %>%
+  kable_styling(
+    latex_options = c("hold_position", "striped"),
+    full_width = FALSE
+  )
+```
+
+D’après ces résultats, la distribution des dépenses de fonctionnement apparaît relativement symétrique, avec un écart-type faible, ce qui suggère des niveaux de dépenses plus stables entre les communes. En revanche, les dépenses d’investissement présentent une plus forte hétérogénéité, comme en témoigne un écart-type plus élevé. La présence d’un minimum nul (ou très faible) reflète l’absence de dépenses d’investissement pour certaines communes sur la période donnée. Cette variabilité peut s’expliquer par des différences de taille communale et par les modalités de prise en charge de l’investissement public, notamment au niveau intercommunal.
+
+Les histogrammes ci-dessous confirment visuellement ces distributions :
+
+```{r, echo=FALSE,  fig.height = 4}
+# Histogramme Fonctionnement
+p_dist_fonc <- ggplot(comBFC, aes(x = lCFT_COM)) +
+  geom_histogram(aes(y = after_stat(density)), fill = "#4E79A7", color = "white", bins = 30) +
+  geom_density(alpha = 0.2, fill = "#4E79A7") +
+  theme_minimal() +
+  labs(title = "Distribution : Fonctionnement (log)", x = "Log Dépenses", y = "Densité")
+
+# Histogramme Investissement
+p_dist_inv <- ggplot(comBFC, aes(x = lDIT_COM)) +
+  geom_histogram(aes(y = after_stat(density)), fill = "#E15759", color = "white", bins = 30) +
+  geom_density(alpha = 0.2, fill = "#E15759") +
+  theme_minimal() +
+  labs(title = "Distribution : Investissement (log)", x = "Log Dépenses", y = "Densité")
+
+# Affichage côte à côte
+grid.arrange(p_dist_fonc, p_dist_inv, ncol = 2)
+```
+
+## Autocorrélation spatiale globale (Moran)
+
+À ce stade de l'étude, nous cherchons à déterminer si les dépenses des communes sont distribuées de manière aléatoire ou si elles présentent une structure spatiale particulière (regroupement). Pour cela, nous utilisons le test global de Moran en nous appuyant sur la matrice de contiguïté définie précédemment (`w_queen``).
+
+```{r, echo=FALSE}
+# Test global de Moran pour les dépenses de fonctionnement
+moran_fonc <- moran.test(comBFC$lCFT_COM, w_queen)
+
+# Test global de Moran pour les dépenses d'investissement
+moran_inv <- moran.test(comBFC$lDIT_COM, w_queen)
+
+# Affichage des résultats
+cat("--- Résultat Moran : Fonctionnement ---\n")
+print(moran_fonc)
+cat("\n--- Résultat Moran : Investissement ---\n")
+print(moran_inv)
+```
+
+### Analyse des résultats
+
+**Dépenses de fonctionnement** Les résultats du test mettent en évidence une autocorrélation spatiale positive et statistiquement significative ($p < 2.2 \times 10^{-16}$). La valeur élevée de l’indice de Moran ($I \approx 0.318$) indique que les communes présentant des niveaux de dépenses de fonctionnement similaires tendent à se regrouper spatialement. Ce résultat suggère l’existence de dépendances spatiales marquées (effets de voisinage ou caractéristiques territoriales partagées) pour ce type de dépenses.
+
+**Dépenses d'investissement** Concernant les dépenses d’investissement, l’indice de Moran est également positif et significatif ($p < 0.05$). Toutefois, la valeur de l’indice est nettement plus faible ($I \approx 0.072$). Cela traduit une autocorrélation spatiale globale beaucoup plus modérée : les communes ayant des comportements d’investissement similaires sont proches géographiquement, mais de manière moins systématique que pour le fonctionnement. L'investissement semble répondre à des logiques plus ponctuelles ou hétérogènes.
+
+**Conclusion** La mise en évidence d’une autocorrélation spatiale globale (forte pour le fonctionnement, modérée pour l’investissement) justifie de poursuivre l’étude par une analyse des **structures locales (LISA)**. Cela nous permettra d’identifier précisément où se situent les clusters de fortes dépenses (points chauds) ou de faibles dépenses (points froids).
+
+## Autocorrélation spatiale locale : statistiques LISA
+
+**Objectif** Après avoir mis en évidence l’existence d’une autocorrélation spatiale globale des dépenses communales, cette section vise à identifier les structures locales d’autocorrélation. Les statistiques LISA (Local Indicators of Spatial Association) permettent de repérer les clusters spatiaux significatifs et les valeurs atypiques locales, à partir de l’indice de Moran local. L’analyse est réalisée à l’aide de la matrice de contiguïté d’ordre 1 standardisée en ligne, cohérente avec le test global précédent.
+
+```{r}
+# Fonction de calcul et classification LISA
+calc_lisa_clusters <- function(data, var_name, listw, alpha = 0.01) {
+  
+  # 1. Calcul du Moran Local
+  x <- data[[var_name]]
+  # Standardisation
+  z <- as.numeric(scale(x))
+  # Lag spatial
+  lag_z <- lag.listw(listw, z)
+  # Calculs statistiques
+  locm <- localmoran(x, listw)
+  pval <- locm[, 5]
+  
+  # 2. Classification
+  classes <- rep("Non Sig.", length(z))
+  
+  # Logique de classification (HH, LL, HL, LH)
+  # Seuil de significativité appliqué (alpha)
+  is_sig <- pval <= alpha
+  
+  classes[is_sig & z >= 0 & lag_z >= 0] <- "High-High"
+  classes[is_sig & z <= 0 & lag_z <= 0] <- "Low-Low"
+  classes[is_sig & z >= 0 & lag_z <= 0] <- "High-Low"
+  classes[is_sig & z <= 0 & lag_z >= 0] <- "Low-High"
+  
+  # Retourner le facteur ordonné
+  factor(classes, levels = c("High-High", "Low-Low", "High-Low", "Low-High", "Non Sig."))
+}
+
+# Application aux données
+comBFC$cluster_fonc <- calc_lisa_clusters(comBFC, "lCFT_COM", w_queen, alpha = 0.01)
+comBFC$cluster_inv  <- calc_lisa_clusters(comBFC, "lDIT_COM", w_queen, alpha = 0.01)
+```
+
+```{r echo=FALSE}
+# Définition des couleurs (Rouge, Bleu, Orange, Bleu pâle, Gris)
+lisa_colors <- c("High-High" = "#D7191C", 
+                 "Low-Low"   = "#2C7BB6", 
+                 "High-Low"  = "#FDAE61", 
+                 "Low-High"  = "#ABD9E9", 
+                 "Non Sig."  = "#F0F0F0")
+
+# Fonction d'affichage tmap
+plot_lisa_tmap <- function(data, var_cluster, titre) {
+  tm_shape(data) +
+    tm_polygons(fill = var_cluster,
+                col = NA,
+                fill.scale = tm_scale_categorical(values = lisa_colors),
+                fill.legend = tm_legend(title = "Type de Cluster")) +
+    tm_title(titre) +
+    tm_layout(frame = FALSE, legend.outside = TRUE)
+}
+```
+
+### LISA – Dépenses de fonctionnement
+
+```{r, echo=FALSE}
+plot_lisa_tmap(comBFC, "cluster_fonc", "Clusters LISA : Fonctionnement")
+```
+
+La carte des statistiques LISA appliquées aux dépenses de fonctionnement met en évidence l’existence de clusters spatiaux localisés. Des regroupements de communes caractérisées par des niveaux élevés de dépenses de fonctionnement, entourées de communes aux profils similaires (clusters **High-High** en rouge), apparaissent principalement autour de certains pôles territoriaux. À l’inverse, des clusters de faibles dépenses (**Low-Low** en bleu) se concentrent davantage dans des zones à dominante rurale.
+
+Néanmoins, le nombre de clusters significatifs demeure relativement limité. La majorité des communes n’appartient à aucun cluster statistiquement significatif au seuil de 1 % (gris), ce qui indique que l’autocorrélation spatiale des dépenses de fonctionnement, bien que présente, reste essentiellement localisée et ne concerne qu’une partie restreinte du territoire régional.
+
+### LISA – Dépenses d'investissement
+
+```{r, echo=FALSE}
+plot_lisa_tmap(comBFC, "cluster_inv", "Clusters LISA : Investissement")
+```
+
+La carte des statistiques LISA appliquées aux dépenses d’investissement met également en évidence la présence de clusters spatiaux, bien que leur structure diffère de celle observée pour les dépenses de fonctionnement. Les clusters **High-High** apparaissent de manière plus ponctuelle et semblent davantage concentrés dans certaines zones spécifiques du territoire.
+
+Les clusters **Low-Low**, bien que présents, restent relativement dispersés et concernent un nombre limité de communes. Comme pour les dépenses de fonctionnement, la majorité des communes ne présente pas d’autocorrélation spatiale locale significative au seuil de 1 %, ce qui suggère que les dépenses d’investissement sont plus hétérogènes spatialement et moins systématiquement structurées par des effets de voisinage.
+
+# Analyse descriptive des variables explicatives
+
+Dans cette section, nous analysons les déterminants potentiels des dépenses publiques locales.
+
+## Signes attendus des variables explicatives
+
+Avant de procéder à l’analyse économétrique, il convient de préciser les signes attendus des variables explicatives sur les dépenses communales. Ces hypothèses reposent sur la littérature économique relative aux finances locales (effet de taille, charges de centralité, loi de Wagner) et sur les mécanismes institutionnels.
+
+Nous avons regroupé ces déterminants en quatre catégories principales : démographie et économie, caractéristiques spatiales, structure sociale et logement, et enfin situation financière.
+
+### Variables démographiques et économiques
+
+- **Population (`1PMUN`) :** La population municipale est le premier déterminant des besoins en services publics. Une population plus importante implique des "charges de centralité" (équipements collectifs, personnel). Le signe attendu est **positif (+)**.
+- **Emploi sur place (`1EMPLT`) :** Ce proxy de l'attractivité économique mesure l'afflux d'usagers non-résidents (navetteurs) qui consomment des services (voirie, transports) sans nécessairement contribuer à la fiscalité résidentielle. Un effet **positif est attendu (+)**.
+- **Potentiel fiscal (`prod_3_taxe_com`) :** Selon la loi de Wagner, la demande de biens publics croît avec la richesse. Une base fiscale plus élevée offre une capacité de financement supérieure ("effet richesse"), favorisant la dépense. Signe attendu : **positif (+)**.
+
+### Variables spatiales
+
+- **Superficie et urbanisation (`1SUPERF`, `1surfres`, `1surfact`) :** Une superficie communale étendue génère des coûts d'entretien (réseaux, voirie) plus élevés. De même, l'extension des surfaces urbanisées (résidentielles ou économiques) accroît la pression sur les infrastructures. Le signe attendu est **positif (+)**, particulièrement pour l'investissement.
+
+### Variables sociales et structure du logement
+
+Certaines variables captent des besoins sociaux spécifiques nécessitant une intervention publique accrue (CCAS, aides, politique de la ville) :
+
+- **Précarité et besoins sociaux :** Le taux de chômage (`TXX_CHOM1564`), le taux de logements HLM (`TXX_RP_LOCHLMV`) et la part des personnes âgées (`TXX_SEUL65P`) sont des indicateurs de populations vulnérables ou dépendantes de services publics spécifiques. Un signe **positif est attendu (+)**.
+- **Tourisme (`TXX_RSECOCC`) :** Un fort taux de résidences secondaires indique une vocation touristique imposant des suréquipements (dimensionnés pour les pics de fréquentation) par rapport à la population permanente. Signe attendu : **positif (+)**.
+- **Vacance (`TXX_LOGVAC`) :** À l'inverse, un taux élevé de logements vacants peut refléter une déprise territoriale et une moindre pression sur les services, suggérant un signe **négatif (-)**.
+
+### Variables financières
+
+- **Dette (`TXX_ENDET`, `ANNUITE_COM`) :** Le poids de la dette passée contraint les marges de manœuvre actuelles. Un endettement élevé génère des charges d'intérêts (effet "ciseau") et limite la capacité d'autofinancement pour les nouveaux projets. Un signe **négatif est attendu (-)**, spécifiquement sur l'investissement.
+
+## Synthèse des effets attendus
+
+Le tableau ci-dessous résume les hypothèses pour l'ensemble des variables retenues :
+
+| Variable | Libellé | Signe | Justification économique majeure |
+| :--- | :--- | :---: | :--- |
+| `1PMUN` | Log Population | **+** | Effet de taille et charges de centralité. |
+| `1EMPLT` | Log Emploi sur place | **+** | Attractivité et coûts liés aux usagers non-résidents. |
+| `prod_3_taxe_com`| Potentiel fiscal | **+** | Effet richesse (capacité à dépenser). |
+| `1SUPERF` | Log Superficie | **+** | Coûts de réseaux et d'entretien de l'espace. |
+| `1surfres/act` | Surfaces urbanisées | **+** | Pression sur les infrastructures (voirie, réseaux). |
+| `TXX_CHOM1564` | Taux de chômage | **+** | Demande d'interventions sociales. |
+| `TXX_RP_LOCHLMV` | Taux de logements HLM| **+** | Indicateur de charges socio-urbaines. |
+| `TXX_SEUL65P` | Part des 65 ans et + | **+** | Besoins en services à la personne / action sociale. |
+| `TXX_RSECOCC` | Taux résid. secondaires| **+** | Surcoûts liés à la vocation touristique. |
+| `TXX_LOGVAC` | Taux logements vacants | **-** | Moindre pression démographique et de service. |
+| `TXX_ENDET` | Taux d'endettement | **-** | Contrainte financière (effet d'éviction). |
+
+## Cartographie des variables explicatives clés
+
+Afin de compléter l’analyse descriptive, nous proposons une cartographie de deux variables explicatives majeures. Ces variables ont été sélectionnées pour leur capacité à illustrer deux dimensions opposées mais complémentaires des finances locales :
+
+1.  **La dimension structurelle (Hiérarchie urbaine) :** Via la population communale (`1PMUN`). Elle conditionne mécaniquement le niveau des dépenses et l'offre d'équipements.
+2.  **La dimension sociale (Besoins) :** Via le taux de chômage (`TXX_CHOM1564`). Elle permet d'identifier les zones de fragilité nécessitant des interventions publiques spécifiques.
+
+Pour la cartographie des variables explicatives, nous avons privilégié une discrétisation par quantiles (5 classes). Ce choix permet de comparer efficacement les communes entre elles en répartissant un nombre égal d'unités dans chaque classe, ce qui est idéal pour mettre en évidence la hiérarchie urbaine (population) et les disparités sociales (chômage) sans être biaisé par des valeurs extrêmes.
+
+```{r, echo=FALSE}
+# 1. Carte de la Population (Log)
+map_pop <- tm_shape(comBFC) +
+  tm_polygons(fill = "lPMUN",
+              col = NA,
+              fill.scale = tm_scale_intervals(n = 5, style = "quantile", values = "Blues", label.na = ""),
+              fill.legend = tm_legend(title = "Log Population")) +
+  tm_title("Population Communale") +
+  tm_layout(frame = FALSE, legend.outside = TRUE)
+
+# 2. Carte du Chômage
+map_chom <- tm_shape(comBFC) +
+  tm_polygons(fill = "TXX_CHOM1564",
+              col = NA,
+              fill.scale = tm_scale_intervals(n = 5, style = "quantile", values = "plasma", label.na = ""),
+              fill.legend = tm_legend(title = "% Actifs 15-64 ans")) +
+  tm_title("Taux de Chômage") +
+  tm_layout(frame = FALSE, legend.outside = TRUE)
+
+# Affichage côte à côte
+tmap_arrange(map_pop, map_chom, ncol = 2)
+```
+
+**Analyse de la Population** Communale La carte de la population met en évidence une forte hétérogénéité spatiale au sein de la région Bourgogne–Franche-Comté. Les communes les plus peuplées (en bleu foncé) se concentrent logiquement autour des principaux pôles urbains (Dijon, Besançon, Belfort-Montbéliard), dessinant l'armature urbaine régionale. À l’inverse, les vastes zones de teintes claires illustrent la prédominance spatiale des territoires ruraux plus faiblement peuplés. Cette variable est centrale car elle capte l'effet de taille : une population plus élevée implique mécaniquement des charges de centralité et des besoins accrus en infrastructures.
+
+**Analyse du Taux de Chômage** La carte du chômage révèle une géographie différente, celle de la fragilité sociale. Les zones de fort chômage (en teintes sombres/violettes) ne se superposent pas parfaitement à la hiérarchie urbaine. On observe des poches de précarité qui peuvent correspondre à d'anciens bassins industriels en reconversion ou à des zones périphériques en difficulté. Un taux de chômage élevé agit comme un indicateur de besoins sociaux accrus, exerçant une pression à la hausse sur les dépenses de fonctionnement (action sociale, CCAS) indépendamment de la taille de la commune.
+
+## Statistiques descriptives univariées
+
+```{r}
+# Sélection des variables explicatives clés
+vars_expl_clés <- comBFC %>%
+  st_drop_geometry() %>%
+  select(lPMUN, lEMPLT, prod_3_taxe_com, TXX_CHOM1564, 
+         TXX_RP_LOCHLMV, TXX_ENDET, TXX_RSECOCC)
+
+# Tableau récapitulatif
+stats_uni <- data.frame(
+  Moyenne = sapply(vars_expl_clés, mean, na.rm = TRUE),
+  SD = sapply(vars_expl_clés, sd, na.rm = TRUE),
+  Min = sapply(vars_expl_clés, min, na.rm = TRUE),
+  Max = sapply(vars_expl_clés, max, na.rm = TRUE)
+)
+
+stats_uni %>%
+  kable(digits = 3, caption = "Synthèse des variables explicatives") %>%
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+Les statistiques descriptives univariées mettent en évidence une forte hétérogénéité des caractéristiques communales au sein de la région Bourgogne Franche Comté. La population (lPMUN) et l’emploi (lEMPLT) présentent des moyennes respectives de 5,65 et 4,44, avec des écarts-types relativement élevés, traduisant des différences importantes de taille et de dynamisme économique entre communes. Le potentiel fiscal communal (prod_3_taxe_com) affiche une dispersion particulièrement marquée (écart-type de 134 pour une moyenne de 283), ce qui souligne de fortes inégalités de ressources fiscales locales. Les variables sociales, telles que le taux de chômage (TXX_CHOM1564) ou la part de logements sociaux (TXX_RP_LOCHLMV), présentent également une variabilité notable, indiquant des situations sociales très contrastées d’un territoire à l’autre, toutes choses égales par ailleurs.
+
+## Statistiques descriptives multivariées 
+
+```{r}
+# Matrice de corrélation pour vérifier la colinéarité
+cor_matrix <- cor(vars_expl_clés, use = "complete.obs")
+corrplot::corrplot(cor_matrix, method = "color", type = "upper", 
+         tl.col = "black", addCoef.col = "black", number.cex = 0.7)
+```
+L’analyse des corrélations permet de préciser les relations entre ces variables explicatives. La population et l’emploi sont fortement corrélés positivement (0,89), ce qui est attendu : lorsque la population augmente, l’emploi tend également à augmenter, toutes choses égales par ailleurs. La population et l’emploi sont aussi positivement corrélés à la part de logements sociaux (0,60 et 0,64 respectivement), suggérant que les communes les plus peuplées et les plus dynamiques concentrent davantage de parc social. En revanche, ces deux variables sont négativement corrélées à la fiscalité économique (TX_RESCOCC), indiquant que les communes plus grandes ou plus dynamiques ne sont pas nécessairement celles où la pression fiscale économique est la plus élevée. Les corrélations entre les autres variables restent globalement modérées, ce qui limite les risques de multicolinéarité sévère dans les modèles économétriques ultérieurs et justifie leur inclusion conjointe dans les estimations, toutes choses égales par ailleurs.
+
+# Estimation d’un modèle de régression linéaire – MCO
+
+Avant de mobiliser les outils de l'économétrie spatiale, nous estimons un modèle linéaire standard (Moindres Carrés Ordinaires). Cela nous servira de point de comparaison.
+
+Nous estimons l'équation suivante pour nos deux variables dépendantes ($y$) :
+
+$$y_i = \beta_0 + \beta_1 \text{Pop}_i + \beta_2 \text{Emploi}_i + \beta_3 \text{Richesse}_i + \beta_4 \text{Chomage}_i + \beta_5 \text{HLM}_i + \beta_6 \text{Dette}_i + \varepsilon_i$$
+
+## Estimation des modèles
+
+```{r mco_estimation, echo=FALSE}
+# Définition des équations (formules)
+# On utilise les noms exacts de vos variables
+f_fonc <- lCFT_COM ~ lPMUN + lEMPLT + prod_3_taxe_com + TXX_CHOM1564 + TXX_RP_LOCHLMV + TXX_ENDET + TXX_RSECOCC + factor(DEP)
+f_inv  <- lDIT_COM ~ lPMUN + lEMPLT + prod_3_taxe_com + TXX_CHOM1564 + TXX_RP_LOCHLMV + TXX_ENDET + TXX_RSECOCC + factor(DEP)
+
+# Estimation par MCO (Fonction lm)
+mco_fonc <- lm(f_fonc, data = comBFC)
+mco_inv  <- lm(f_inv,  data = comBFC)
+
+# Affichage des résultats sous forme de tableau comparatif
+# Utilisation de screenreg (package texreg) pour un rendu propre dans la console/Rmd
+screenreg(list(mco_fonc, mco_inv),
+          custom.model.names = c("Fonctionnement", "Investissement"),
+          digits = 3)
+```
+
+Le tableau de régression ci-dessus nous donne une première estimation des déterminants :
+- Les variables portant des étoiles (`***`, `**`, `*`) sont statistiquement significatives.
+- Il est probable que la **Population** (`lPMUN`) et la **Richesse fiscale** (`prod_3_taxe_com`) aient des coefficients positifs significatifs, confirmant les effets de taille et de richesse (Loi de Wagner).
+
+## Diagnostics des résidus
+
+L'hypothèse fondamentale des MCO est que les résidus ($\varepsilon$) sont indépendants. Or, en présence de données géographiques, il est fréquent que les erreurs soient corrélées spatialement (ce qu'on n'a pas expliqué ici déborde sur le voisin).
+
+Nous appliquons le **Test de Moran sur les résidus** pour vérifier cette hypothèse.
+
+```{r, echo=FALSE}
+test_moran_res_fonc <- lm.morantest(mco_fonc, w_queen, alternative = "two.sided")
+test_moran_res_inv  <- lm.morantest(mco_inv,  w_queen, alternative = "two.sided")
+
+cat("--- Test de Moran sur les résidus (Fonctionnement) ---\n")
+print(test_moran_res_fonc)
+
+cat("\n--- Test de Moran sur les résidus (Investissement) ---\n")
+print(test_moran_res_inv)
+```
+
+**Dépenses de fonctionnement :** La p-value est très faible (généralement $< 0.05$). Nous rejetons l'hypothèse nulle d'absence d'autocorrélation spatiale. Les erreurs ne sont pas distribuées aléatoirement : il reste de la structure spatiale non expliquée par nos variables indépendantes.
+
+**Dépenses d'investissement :** De même, si le test est significatif, cela indique que les choix d'investissement dépendent de facteurs géographiques non observés ou des voisins.
+
+**Conclusion :**
+La présence avérée d'autocorrélation spatiale dans les résidus viole l'hypothèse d'indépendance des erreurs des MCO. Les estimateurs classiques risquent d'être biaisés ou inefficaces. **Ce diagnostic justifie formellement le recours aux modèles d'économétrie spatiale (SAR, SDM)** pour modéliser explicitement ces interactions.
+
+# Estimation d’un modèle SAR
+
+Le modèle SAR (*Spatial AutoRegressive*) postule que le niveau de dépense d'une commune dépend des caractéristiques locales ($X\beta$), mais aussi directement du niveau de dépense de ses voisines ($\rho Wy$).
+
+$$y = \rho W y + X\beta + \varepsilon$$
+
+Nous incluons des **effets fixes départementaux** pour contrôler les hétérogénéités spatiales invariantes (politiques départementales, géographie).
+
+## Estimation des modèles (ML et 2SLS)
+
+Nous estimons le modèle pour les dépenses de fonctionnement et d'investissement. Nous comparons deux méthodes d'estimation pour vérifier la robustesse:
+* **ML (Maximum Likelihood)** : L'estimateur standard, efficace sous hypothèse de normalité des résidus.
+* **2SLS (Two-Stage Least Squares)** :  Une approche par variables instrumentales, plus robuste si l'hypothèse de normalité n'est pas respectée.
+
+```{r sar_estimation, echo=FALSE}
+# Formules incluant les effets fixes département
+f_fonc <- lCFT_COM ~ lPMUN + lEMPLT + prod_3_taxe_com + TXX_CHOM1564 + TXX_RP_LOCHLMV + TXX_ENDET + TXX_RSECOCC + factor(DEP)
+f_inv  <- lDIT_COM ~ lPMUN + lEMPLT + prod_3_taxe_com + TXX_CHOM1564 + TXX_RP_LOCHLMV + TXX_ENDET + TXX_RSECOCC + factor(DEP)
+
+# --- Dépenses de Fonctionnement ---
+sar_ml_fonc  <- lagsarlm(f_fonc, data = comBFC, listw = w_queen, method = "Matrix")
+sar_2sls_fonc <- stsls(f_fonc, data = comBFC, listw = w_queen)
+
+# --- Dépenses d'Investissement ---
+sar_ml_inv  <- lagsarlm(f_inv, data = comBFC, listw = w_queen, method = "Matrix")
+sar_2sls_inv <- stsls(f_inv, data = comBFC, listw = w_queen)
+
+# 1. Tableau pour les modèles ML (Supportés par screenreg)
+cat("### Tableau des modèles SAR (Estimation ML)\n")
+screenreg(list(sar_ml_fonc, sar_ml_inv),
+          custom.model.names = c("Fonctionnement (ML)", "Investissement (ML)"),
+          omit.coef = "factor", # Masque les effets fixes pour la lisibilité
+          digits = 3)
+
+# 2. Résumés pour les modèles 2SLS (Non supportés par screenreg, affichage brut)
+cat("\n### Résumé du modèle SAR 2SLS - Fonctionnement\n")
+# On affiche un résumé concis
+print(summary(sar_2sls_fonc)$Coef)
+
+cat("\n### Résumé du modèle SAR 2SLS - Investissement\n")
+print(summary(sar_2sls_inv)$Coef)
+```
+
+### Interprétation des résultats
+
+L'analyse des tableaux ci-dessus nous permet de tirer des conclusions contrastées selon le type de dépense :
+
+1. Dépenses de Fonctionnement : Confirmation du mimétisme
+  - Le coefficient d'autocorrélation spatiale $\rho$ (Rho) est positif et très significatif dans les deux modèles.
+  - Estimation ML : $\rho = 0.356$ (p < 0.001).
+  - Estimation 2SLS : $\rho \approx 0.186$ (p < 0.001).
+  - **Interprétation :** Il existe une forte interaction stratégique. Les choix de gestion courante d'une commune sont influencés par ceux de ses voisines (mimétisme budgétaire).
+
+2. Dépenses d'Investissement : Résultats non robustes
+  - L'estimation ML suggère une interaction positive ($\rho = 0.114$, p < 0.001).
+  - Cependant, l'estimation 2SLS invalide ce résultat : le coefficient devient nul et non significatif ($\rho \approx -0.0006$, p = 0.99).
+  - **Interprétation :** L'apparente dépendance spatiale des investissements détectée par le ML pourrait être un artefact statistique (du aux non-normalités). En contrôlant mieux via les 2SLS, il semble que les investissements répondent à des logiques purement internes (dette, besoins d'infrastructures) plutôt qu'à une influence du voisinage.
+
+3. Autres déterminants clés
+  - La dette (`TXX_ENDET`) a un impact massif sur l'investissement (coeff +0.323), mais aucun effet sur le fonctionnement, ce qui est cohérent avec la théorie (l'emprunt finance l'investissement).
+
+## Analyse des impacts (Directs, Indirects et Totaux)
+
+Dans un modèle SAR, les coefficients $\beta$ ne peuvent pas être interprétés comme des élasticités simples à cause de la boucle de rétroaction spatiale ("effet multiplicateur spatial"). Nous décomposons donc les effets marginaux :
+
+- Impact Direct : L'effet d'une variation d'une variable $X$ dans la commune $i$ sur la dépense de la commune $i$ (incluant le retour de l'effet "feedback" des voisins).
+- Impact Indirect (Spillover) : L'effet d'une variation d'une variable $X$ dans la commune $i$ sur les dépenses de toutes les autres communes voisines.
+- Impact Total : La somme des deux.
+
+```{r, echo=FALSE}
+# Calcul des impacts pour les modèles ML (Méthode Monte Carlo pour les p-values)
+# R = 500 simulations (augmenter si nécessaire)
+imp_fonc <- impacts(sar_ml_fonc, listw = w_queen, R = 500)
+imp_inv  <- impacts(sar_ml_inv,  listw = w_queen, R = 500)
+
+cat("=== IMPACTS : Dépenses de Fonctionnement ===\n")
+summary(imp_fonc, zstats = TRUE, short = TRUE)
+
+cat("\n=== IMPACTS : Dépenses d'Investissement ===\n")
+summary(imp_inv, zstats = TRUE, short = TRUE)
+```
+
+**Analyse détaillée des résultats** L’analyse des impacts nous permet de comprendre la diffusion spatiale des chocs économiques :
+
+1. Économies d'échelle et Population (`1PMUN`) :
+
+  - Pour le **fonctionnement**, l'impact direct est de **** et l'indirect de **** (tous deux très significatifs, ).
+  - *Interprétation* : Une augmentation de la population réduit les dépenses par habitant (économies d'échelle). Cet effet bénéfique se propage aux voisins (effet indirect négatif), suggérant que la densification d'une zone réduit la pression sur les dépenses courantes de l'ensemble du voisinage.
+
+2. Rôle social et HLM (`TXX_RP_LOCHLMV`) :
+
+  - Pour le **fonctionnement**, l'impact est positif : Direct (****) et Indirect (****).
+  - *Interprétation* : Une commune avec plus de logements sociaux a des charges de centralité plus élevées. De plus, cela génère une externalité positive sur les voisins (effet de débordement), les incitant à dépenser plus également. Pour l'investissement, cet effet n'est pas significatif.
+
+3. Le moteur de la Dette (`TXX_ENDET`) :
+
+  - Pour le **fonctionnement**, l'impact est nul ( pour le direct et l'indirect). La dette ne finance pas le fonctionnement.
+  - Pour l'**investissement**, l'impact est massif : Direct (****) et Indirect (****), significatif à .
+  - *Interprétation* : L'endettement est le levier principal de l'investissement local. Fait intéressant, une commune qui s'endette pour investir stimule aussi l'investissement de ses voisins (bien que modestement), ce qui pourrait refléter des dynamiques de développement d'infrastructures intercommunales ou de concurrence par les équipements.
+
+## Hétérogénéité du coefficient spatial selon le département
+
+```{r}
+
+# On teste si l'impact de l'emploi (lEMPLT) varie selon le département (DEP)
+# On utilise lagsarlm pour le modèle SAR avec une interaction (*)
+sar_het_fonc <- lagsarlm(lCFT_COM ~ lPMUN + lEMPLT * factor(DEP) + prod_3_taxe_com, 
+                         data = comBFC, 
+                         listw = w_queen,
+                         method = "Matrix")
+
+# Affichage des résultats pour l'analyse
+summary(sar_het_fonc)
+
+# Test de diagnostic sur les résidus pour vérifier la qualité du modèle
+moran.test(residuals(sar_het_fonc), w_queen)
+```
+L’estimation du modèle SAR met en évidence une forte dépendance spatiale des dépenses communales, avec un coefficient autorégressif ρ = 0,408 (p < 2,22e-16). Autrement dit, toutes choses égales par ailleurs, une part importante de la dynamique des dépenses d’une commune est liée à celle des communes voisines, ce qui confirme l’existence d’interactions territoriales marquées et justifie le recours à un modèle spatial.
+
+S’agissant des effets structurels, lorsque la population communale augmente, les dépenses diminuent, toutes choses égales par ailleurs, comme l’indique l’effet négatif et fortement significatif de la population (–0,211 ; p < 2e-16). À l’inverse, lorsque l’emploi augmente, les dépenses augmentent, toutes choses égales par ailleurs, avec un effet positif et significatif dans le département de référence (+0,136 ; p < 2e-16), traduisant une pression accrue de l’activité économique sur les services publics locaux. Le potentiel fiscal communal exerce également un effet positif et significatif (+0,00093 ; p < 2e-16), indiquant que, à caractéristiques comparables, les communes disposant de ressources fiscales plus élevées tendent à dépenser davantage.
+
+L’introduction d’interactions entre l’emploi et les départements met en évidence une hétérogénéité territoriale de l’effet de l’emploi, toutes choses égales par ailleurs. Par rapport au département de référence, l’impact de l’emploi est significativement plus faible dans le Jura (–0,043 ; p = 0,0009) et en Haute-Saône (–0,051 ; p < 1e-06), ce qui suggère que, dans ces territoires, l’augmentation de l’activité économique se traduit par une hausse plus modérée des dépenses communales. À l’inverse, l’effet de l’emploi apparaît plus élevé dans le Territoire de Belfort (+0,041 ; p = 0,034), traduisant une sensibilité accrue des dépenses à la densité d’emploi dans ce département. Les autres départements ne présentent pas de différences statistiquement significatives par rapport à la référence.
+
+e test de Moran sur les résidus de ce modèle affiche une p-value de 0,4229, ce qui signifie que nous ne pouvons plus rejeter l'hypothèse nulle d'absence d'autocorrélation. Cela prouve que l'intégration de la dépendance spatiale (ρ) et de l'hétérogénéité départementale a permis de capter toute la structure géographique des données.
+
+# Estimation d’un modèle de Durbin avec la population et l’emploi en variables décalées
+
+Le modèle de Durbin (Spatial Durbin Model, SDM) étend le modèle SAR en autorisant les caractéristiques des communes voisines à influencer directement le niveau de dépense d’une commune. Le niveau de dépense dépend ainsi à la fois des caractéristiques locales ($X\beta$), du niveau de dépense des communes voisines ($\rho Wy$), mais également des caractéristiques des communes voisines via les variables explicatives décalées spatialement ($WX\theta$).
+
+$$
+y = \rho W y + X\beta + W X \theta + \varepsilon
+$$
+
+
+Dans cette spécification, $\rho$ mesure l’intensité de la dépendance spatiale sur la variable expliquée, tandis que $\theta$ capte les effets de diffusion associés aux variables explicatives décalées spatialement. Conformément à la consigne, seuls les retards spatiaux de la population et de l’emploi sont introduits dans le modèle.
+
+Pour la suite de l'étude, nous nous focalisons sur les lags de la population et de l'emploi.
+
+```{r, echo=FALSE, eval=FALSE}
+# On définit les variables à décaler spatialement (Population et Emploi)
+formule <- lCFT_COM ~ lPMUN + lEMPLT + prod_3_taxe_com + TXX_CHOM1564 + 
+                      TXX_RP_LOCHLMV + TXX_ENDET + TXX_RSECOCC + factor(DEP)
+sdm_fonc <- lagsarlm(formule, data = comBFC, listw = w_queen, 
+                     Durbin = ~ lPMUN + lEMPLT, method = "Matrix")
+
+# Comparaison SAR vs SDM (Test de rapport de vraisemblance)
+LR.Sarlm(sdm_fonc, sar_ml_fonc)
+```
+Le test de rapport de vraisemblance (LR test) compare le modèle SAR au modèle de Durbin (SDM). Avec une p-value de 0,0023, le test est significatif au seuil de 1%. On rejette donc le modèle SAR : cela démontre que les variables de voisinage (Population et Emploi des voisins) ont un effet propre qui ne peut pas être résumé au seul mimétisme global.
+Le modèle de Durbin (SDM) s'avère supérieur au modèle SAR (confirmé par le test LR). Il montre que les caractéristiques des voisins (population, emploi) impactent directement les dépenses locales. L'analyse des impacts indirects souligne l'existence de "spillovers" : une forte activité économique chez les voisins génère des charges de centralité (infrastructures, services) pour la commune, au-delà de ses propres besoins internes.
+
+
+## Estimation des modèles (ML et 2SLS Robuste)
+
+Nous utilisons `lapply` pour estimer le modèle sur nos trois matrices de poids (`w_queen`, `w_knn5`, `W_dist`) afin de tester la robustesse du coefficient $\rho$.
+#### ## Estimation par Maximum de Vraisemblance (ML) sur 3 matrices
+
+
+```{r sdm_ml_lapply}
+# Liste des matrices et des formules
+matrices <- list(Queen = w_queen, KNN5 = w_knn5, Distance = W_dist)
+
+f_fonc <- lCFT_COM ~ lPMUN + lEMPLT + prod_3_taxe_com + TXX_CHOM1564 + 
+          TXX_RP_LOCHLMV + TXX_ENDET + TXX_RSECOCC + factor(DEP)
+
+f_inv  <- lDIT_COM ~ lPMUN + lEMPLT + prod_3_taxe_com + TXX_CHOM1564 + 
+          TXX_RP_LOCHLMV + TXX_ENDET + TXX_RSECOCC + factor(DEP)
+
+# Estimation ML automatisée
+ml_results_fonc <- lapply(matrices, function(w) {
+  lagsarlm(f_fonc, data = comBFC, listw = w, Durbin = ~ lPMUN + lEMPLT, method = "eigen")
+})
+
+ml_results_inv <- lapply(matrices, function(w) {
+  lagsarlm(f_inv, data = comBFC, listw = w, Durbin = ~ lPMUN + lEMPLT, method = "eigen")
+})
+
+# Extraction des Rho pour comparaison
+rho_tab <- data.frame(
+  Matrice = names(matrices),
+  Rho_Fonc = sapply(ml_results_fonc, function(m) m$rho),
+  Rho_Inv  = sapply(ml_results_inv, function(m) m$rho)
+)
+kable(rho_tab, digits = 3, caption = "Robustesse du Rho (ML)")
+```
+L’analyse de robustesse confirme la solidité de nos estimations : le paramètre d’interaction spatiale $\rho$ pour le fonctionnement reste stable et élevé entre la matrice de contiguïté (0,370) et de voisinage fixe (0,365), prouvant que le mimétisme budgétaire est un phénomène structurel indépendant de la définition technique du voisinage (le choix de la mtrcie de contiguité). La hausse observée avec la matrice de distance (0,465) suggère que ces interactions s’étendent au-delà des voisins immédiats pour toucher des bassins de vie plus larges. À l’inverse, la faiblesse constante du ρ pour l’investissement (autour de 0,11) démontre que ces dépenses ne suivent aucune logique de voisinage ; elles pourraient être interprétées comme une réponse à des projets locaux isolés, des subventions spécifiques ou des besoins d'équipement propres à chaque commune, sans effet d’entraînement géographique significatif.
+
+
+#### # Estimation 2SLS avec Inférence Robuste
+```{r}
+
+# 1. ESTIMATIONS 2SLS ROBUSTES 
+# On ajoute les lags de lPMUN et lEMPLT manuellement dans la formule
+f_sdm_2sls_fonc <- lCFT_COM ~ lPMUN + lEMPLT + prod_3_taxe_com + TXX_CHOM1564 + 
+                   TXX_RP_LOCHLMV + TXX_ENDET + TXX_RSECOCC + factor(DEP) + 
+                   lag.listw(w_queen, lPMUN) + lag.listw(w_queen, lEMPLT)
+
+f_sdm_2sls_inv  <- lDIT_COM ~ lPMUN + lEMPLT + prod_3_taxe_com + TXX_CHOM1564 + 
+                   TXX_RP_LOCHLMV + TXX_ENDET + TXX_RSECOCC + factor(DEP) + 
+                   lag.listw(w_queen, lPMUN) + lag.listw(w_queen, lEMPLT)
+sdm_2sls_fonc <- stsls(f_sdm_2sls_fonc, data = comBFC, listw = w_queen, robust = TRUE)
+sdm_2sls_inv  <- stsls(f_sdm_2sls_inv,  data = comBFC, listw = w_queen, robust = TRUE)
+
+#  2. FONCTION POUR RENDRE LE 2SLS COMPATIBLE AVEC SCREENREG 
+# On extrait manuellement les coefficients et les erreurs types
+create_texreg_obj <- function(mod, name) {
+  s <- summary(mod)
+  createTexreg(
+    coef.names = rownames(s$Coef),
+    coef = s$Coef[, 1],
+    se = s$Coef[, 2],
+    pvalues = s$Coef[, 4],
+    model.name = name
+  )
+}
+
+# Conversion des modèles
+tr_2sls_fonc <- create_texreg_obj(sdm_2sls_fonc, "Fonc 2SLS")
+tr_2sls_inv  <- create_texreg_obj(sdm_2sls_inv,  "Inv 2SLS")
+
+# --- 3. AFFICHAGE DU TABLEAU ---
+# Note : Pour les modèles ML (ml_results_fonc$Queen), screenreg marche toujours.
+# On mélange les modèles ML et les objets créés manuellement.
+
+screenreg(list(ml_results_fonc$Queen, tr_2sls_fonc, 
+               ml_results_inv$Queen, tr_2sls_inv),
+          omit.coef = "factor", 
+          digits = 3)
+```
+La comparaison entre l'estimation par Maximum de Vraisemblance (ML) et la méthode des Moindres Carrés Doubles (2SLS) avec inférence robuste confirme la stabilité des résultats. Pour les dépenses de fonctionnement, le coefficient de mimétisme $\rho$ demeure significatif et les variables clés comme l'emploi (lEMPLT) conservent des coefficients quasi identiques d'un modèle à l'autre (environ 0,095). L'utilisation du 2SLS robuste permet de s'affranchir des hypothèses de normalité et de corriger l'hétéroscédasticité potentielle liée à la taille des communes, sans altérer nos conclusions. Cette convergence entre deux méthodes d'estimation différentes, couplée à la robustesse du $\rho$ face aux diverses matrices de voisinage, valide définitivement l'existence d'une dynamique spatiale forte dictée par le mimétisme politique et les charges de centralité.
+
+
+### Analyse des impacts directs et indirects
+
+```{r}
+# Impacts pour le Fonctionnement (Matrice Queen)
+cat("--- Impacts : Dépenses de Fonctionnement ---\n")
+imp_fonc <- impacts(ml_results_fonc$Queen, listw = w_queen, R = 500)
+summary(imp_fonc, zstats = TRUE, short = TRUE)
+
+# Impacts pour l'Investissement (Matrice Queen)
+cat("\n--- Impacts : Dépenses d'Investissement ---\n")
+imp_inv <- impacts(ml_results_inv$Queen, listw = w_queen, R = 500)
+summary(imp_inv, zstats = TRUE, short = TRUE)
+```
+*Analyse détaillée des dépenses de fonctionnement (Modèle de Durbin)*
+
+Les dépenses de fonctionnement sont expliquées par des facteurs structurels, sociaux et fiscaux, dans un contexte de dépendance spatiale marquée. Lorsque la population communale augmente, les dépenses de fonctionnement par habitant diminuent, toutes choses égales par ailleurs. Cet effet est quantitativement important, avec un effet total de –0,260 (p < 2e-16), composé d’un effet direct de –0,192 et d’un effet indirect de –0,069, indiquant que cette relation ne se limite pas à la commune considérée mais se diffuse également aux territoires voisins. Autrement dit, à caractéristiques identiques, les communes plus peuplées supportent un niveau de dépenses de fonctionnement plus faible par habitant. À l’inverse, lorsque l’emploi augmente, les dépenses de fonctionnement par habitant augmentent, toutes choses égales par ailleurs, avec un effet total positif et significatif de +0,094 (p < 1e-4), traduisant une pression accrue sur les services publics et les infrastructures locales, principalement par un effet direct mais aussi via des mécanismes de diffusion spatiale. De même, lorsque le potentiel fiscal communal augmente, les dépenses de fonctionnement par habitant augmentent, toutes choses égales par ailleurs, comme l’indique l’effet total positif de +0,00118 (p < 2e-16), ce qui reflète un comportement budgétaire classique des communes disposant de ressources fiscales plus élevées, renforcé par de forts effets spatiaux. 
+Du point de vue social, une hausse du taux de chômage est associée à une hausse des dépenses de fonctionnement par habitant, toutes choses égales par ailleurs, avec un effet total de +0,00833 (p < 1e-6), traduisant des besoins accrus en matière d’action sociale et de dispositifs publics. De façon similaire, lorsque la part de logements sociaux augmente, les dépenses de fonctionnement par habitant augmentent, toutes choses égales par ailleurs, comme le montre l’effet total fortement positif de +0,0335 (p < 2e-16), reflétant les coûts de gestion, d’entretien et d’accompagnement social, ainsi que des spillovers importants liés aux politiques de peuplement. Enfin, une hausse de la fiscalité économique locale est associée à une augmentation des dépenses de fonctionnement par habitant, toutes choses égales par ailleurs, avec un effet total de +0,00845 (p < 2e-16), cohérent avec une capacité budgétaire accrue. Ces résultats s’inscrivent dans un cadre de forte hétérogénéité départementale, les effets fixes étant positifs et significatifs pour les départements 25, 70, 89 et 90, non significatifs pour le département 58 et marginaux pour le département 39, ce qui indique que, à structure comparable, certaines zones présentent structurellement des niveaux de dépenses de fonctionnement plus élevés.
+
+*Analyse détaillée des dépenses d'e fonctionnement'investissement (Modèle de Durbin)*
+
+Les dépenses d’investissement répondent à des logiques distinctes, principalement liées à la taille, au dynamisme économique et à la capacité financière des communes, dans un cadre de dépendance spatiale significative. Lorsque la population communale augmente, les dépenses d’investissement par habitant diminuent, toutes choses égales par ailleurs. Cet effet est significatif, avec un effet total négatif de –0,241 (p = 0,001), résultant d’un effet direct de –0,098 et d’un effet indirect de –0,143, indiquant que cette relation s’exerce à la fois localement et par diffusion vers les communes voisines. Autrement dit, à caractéristiques identiques, les communes les plus peuplées investissent moins par habitant. À l’inverse, lorsque l’emploi augmente, les dépenses d’investissement par habitant augmentent, toutes choses égales par ailleurs, avec un effet total positif et significatif de +0,218 (p ≈ 2,3e-05), traduisant le rôle central du dynamisme économique dans les décisions d’équipement et de développement, par des effets directs mais aussi des spillovers positifs. De même, lorsque le potentiel fiscal communal augmente, les dépenses d’investissement par habitant augmentent, toutes choses égales par ailleurs, comme l’indique l’effet total positif de +0,00936 (p ≈ 1,4e-10), ce qui souligne l’importance de la capacité financière et de l’autofinancement dans la conduite des politiques d’investissement locales. En revanche, les variables sociales ne jouent pas un rôle significatif : ni le taux de chômage (TXX_CHOM1564), ni la part de logements sociaux (TXX_RP_LOCHLMV) n’ont d’effet statistiquement significatif sur les dépenses d’investissement, toutes choses égales par ailleurs, ce qui suggère que l’investissement répond moins à des besoins sociaux immédiats qu’à des choix stratégiques de long terme. Lorsque la fiscalité économique locale augmente, les dépenses d’investissement par habitant augmentent, toutes choses égales par ailleurs, avec un effet total positif et significatif de +0,0143 (p ≈ 5,4e-09), confirmant le rôle des ressources fiscales dans le financement des projets d’équipement. Enfin, les effets fixes départementaux mettent en évidence une forte hétérogénéité spatiale des comportements d’investissement, avec des effets positifs et significatifs pour les départements 25 et 39, des effets négatifs pour les départements 58 et 70, et des effets non significatifs pour les départements 71, 89 et 90, indiquant que, à structure comparable, les stratégies d’investissement diffèrent sensiblement selon les territoires.
+
+Globalement, les dépenses de fonctionnement et d’investissement présentent des déterminants partiellement communs mais répondent à des logiques distinctes. Lorsque la population augmente, les dépenses par habitant diminuent dans les deux cas, toutes choses égales par ailleurs, tandis que le dynamisme économique et la capacité fiscale jouent un rôle positif marqué. Les dépenses de fonctionnement sont davantage sensibles aux variables sociales, alors que l’investissement relève principalement de choix stratégiques et de capacités financières, avec une hétérogénéité territoriale marquée.
+
+### Estimation du modèle avec hétérogénéité du coefficient selon le département
+
+L’hétérogénéité des coefficients est introduite selon une approche discrète, en autorisant l’effet de l’emploi à varier par département. Ce choix se justifie par le rôle du département comme niveau institutionnel structurant des politiques publiques locales et des cadres budgétaires, et permet de capter des différences de comportement sans recourir à des modèles à coefficients continûment variables plus complexes et moins interprétables.
+
+```{r}
+# TEST D'HÉTÉROGÉNÉITÉ DANS LE MODÈLE DURBIN (SDM)
+
+model_het_disc_sdm <- lagsarlm(lCFT_COM ~ lPMUN + lEMPLT * factor(DEP) + prod_3_taxe_com, 
+                               data = comBFC, 
+                               listw = w_queen, 
+                               Durbin = TRUE)
+
+# Affichage pour vérifier les interactions et les lags des interactions
+summary(model_het_disc_sdm)
+```
+*Analyse de l’hétérogénéité départementale dans le modèle de Durbin*
+
+L’introduction d’interactions départementales dans le modèle de Durbin confirme que l’impact de l’emploi (lEMPLT) sur les dépenses de fonctionnement n’est pas homogène en Bourgogne-Franche-Comté, toutes choses égales par ailleurs. Le coefficient de dépendance spatiale demeure élevé (ρ = 0,448 ; p < 2,22e-16), indiquant que près de 45 % de la dynamique des dépenses communales reste liée aux interactions avec les communes voisines, même après prise en compte des caractéristiques locales et de l’hétérogénéité territoriale. Ce résultat confirme la pertinence du cadre spatial retenu.
+
+S’agissant des effets directs, le modèle met en évidence des écarts significatifs dans la manière dont l’emploi local influence les dépenses de fonctionnement selon le département, toutes choses égales par ailleurs. Par rapport au département de référence, l’effet de l’emploi est significativement plus faible dans le Jura (–0,043 ; p = 0,0009) et en Haute-Saône (–0,065 ; p = 3,16e-07), suggérant que, dans ces territoires, les communes absorbent plus efficacement la pression liée à l’activité économique sur leurs services publics. À l’inverse, l’impact de l’emploi apparaît plus élevé dans le Territoire de Belfort (+0,041 ; p = 0,057), traduisant une sensibilité accrue des dépenses de fonctionnement à la densité d’emploi, dans un contexte plus urbanisé.
+
+Les effets indirects, mesurés à travers les interactions spatiales, révèlent également une hétérogénéité marquée, toutes choses égales par ailleurs. Dans le Doubs (+0,037 ; p = 0,045) et dans le Jura (+0,053 ; p = 0,009), une hausse de l’emploi dans les communes voisines est associée à une augmentation significative des dépenses locales, ce qui traduit des effets de centralité et des charges de réseau plus importantes dans ces territoires. En revanche, dans les autres départements, notamment la Saône-et-Loire ou l’Yonne, ces spillovers liés à l’emploi ne diffèrent pas significativement de la référence, indiquant une plus grande homogénéité des effets spatiaux.
+
+Enfin, l’introduction conjointe des variables décalées spatialement et de l’hétérogénéité départementale améliore nettement la qualité globale du modèle. La baisse du critère d’information (AIC = 2087,7 contre 2191,4 pour le modèle SAR) confirme que le modèle de Durbin avec hétérogénéité offre une représentation plus fidèle des mécanismes budgétaires locaux. Ces résultats montrent que, toutes choses égales par ailleurs, les comportements de dépense des communes répondent à des logiques territoriales fines, qui ne peuvent être appréhendées ni par un modèle non spatial, ni par une approche homogène des coefficients.
+
+
+
+
+## Conclusion
+
+L’analyse économétrique spatiale des budgets communaux en Bourgogne-Franche-Comté met en évidence des logiques de décision différenciées entre les dépenses de fonctionnement et les dépenses d’investissement, tout en soulignant le rôle central des interactions territoriales.
+
+Un premier résultat majeur concerne la forte interdépendance spatiale des dépenses de fonctionnement. Les estimations issues du modèle de Durbin montrent un coefficient autorégressif élevé (ρ = 0,448), indiquant que, toutes choses égales par ailleurs, le niveau de dépense d’une commune est fortement lié à celui de ses voisines. Ce résultat traduit l’existence de mécanismes de mimétisme budgétaire et de contraintes communes au sein des bassins de vie. À l’inverse, les dépenses d’investissement apparaissent comme des décisions plus autonomes, principalement guidées par des considérations internes, en particulier la capacité financière et d’endettement, et beaucoup moins par l’influence directe du voisinage.
+
+L’utilisation du modèle de Durbin a également permis de mettre en évidence l’importance des externalités spatiales liées aux caractéristiques des communes voisines. Les effets associés aux variables décalées spatialement, notamment la population et l’emploi, confirment que les communes ne fonctionnent pas de manière isolée. Elles supportent des charges de centralité liées à l’attractivité de leur environnement économique et démographique. Les tests d’hétérogénéité montrent que ces effets sont géographiquement différenciés et particulièrement marqués dans certains départements, en particulier le Doubs (25) et le Jura (39), où l’activité économique des communes voisines génère un surcroît de dépenses de fonctionnement pour les communes centres.
+
+Sur le plan méthodologique, la stratégie retenue, fondée sur une montée en complexité progressive des modèles (MCO, SAR puis SDM), apparaît pleinement justifiée. Les diagnostics statistiques confirment la bonne spécification des modèles finaux, avec la disparition de l’autocorrélation spatiale résiduelle (p = 0,4229) et une stabilité des résultats face au choix des matrices de poids spatiaux (contiguïté reine et k plus proches voisins). Ces éléments renforcent la robustesse des conclusions tirées de l’analyse.
+
+Enfin, ces résultats ouvrent des perspectives claires en matière de politiques publiques locales. Le fait que les dépenses de fonctionnement d’une commune dépendent largement de la dynamique de son voisinage plaide pour une prise en compte explicite des effets spatiaux dans les mécanismes de péréquation financière. Une intégration plus systématique de ces effets de débordement dans les dotations de l’État permettrait de mieux soutenir les communes centres, qui assument une part importante des services publics au bénéfice de l’ensemble du bassin de vie.
